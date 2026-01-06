@@ -1,0 +1,26 @@
+# Copy this file to terraform.tfvars and fill in your values
+# NOTE: If you have API_KEY and DB_PASSWORD in your .env file, 
+#       the deployment script will use those automatically.
+#       You only need this file for other variables or if you prefer not to use .env
+
+aws_region = "us-east-1"
+project_name = "whatsmiau"
+
+# Database
+db_username = "whatsmiau"
+# db_password will be read from .env file (DB_PASSWORD) or you can set it here
+# db_password = "CHANGE_THIS_PASSWORD"  # Use a strong password!
+
+# API
+# api_key will be read from .env file (API_KEY) or you can set it here
+# api_key = "CHANGE_THIS_API_KEY"  # Use a secure API key!
+
+# Optional: Adjust these based on your needs
+# All services start small and scale automatically
+# rds_instance_class = "db.t3.micro"  # Starts small, storage scales automatically
+# redis_node_type = "cache.t3.micro"  # Starts small
+# ecs_cpu = 512  # 0.5 vCPU - starts small
+# ecs_memory = 1024  # 1GB - starts small
+# ecs_desired_count = 1  # Starts with 1 container
+# ecs_max_capacity = 10  # Scales up to 10 containers automatically
+
