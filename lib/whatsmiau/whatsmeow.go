@@ -10,6 +10,7 @@ import (
 	"github.com/verbeux-ai/whatsmiau/env"
 	"github.com/verbeux-ai/whatsmiau/interfaces"
 	"github.com/verbeux-ai/whatsmiau/lib/storage/gcs"
+	"github.com/verbeux-ai/whatsmiau/lib/storage/local"
 	"github.com/verbeux-ai/whatsmiau/models"
 	"github.com/verbeux-ai/whatsmiau/repositories/instances"
 	"github.com/verbeux-ai/whatsmiau/services"
@@ -109,6 +110,16 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 		if err != nil {
 			zap.L().Panic("failed to create GCS storage", zap.Error(err))
 		}
+	} else if env.Env.LocalMediaPath != "" {
+		baseURL := env.Env.MediaPublicURL
+		if baseURL == "" {
+			baseURL = "http://localhost:" + env.Env.Port
+		}
+		storage, err = local.New(env.Env.LocalMediaPath, baseURL)
+		if err != nil {
+			zap.L().Panic("failed to create local media storage", zap.Error(err))
+		}
+		zap.L().Info("local media storage enabled", zap.String("dir", env.Env.LocalMediaPath), zap.String("baseURL", baseURL))
 	}
 
 	instance = &Whatsmiau{

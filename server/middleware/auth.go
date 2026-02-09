@@ -13,6 +13,10 @@ func Auth(ctx echo.Context, next echo.HandlerFunc) error {
 	if ctx.Request().URL.Path == "/" || ctx.Request().URL.Path == "/health" {
 		return next(ctx)
 	}
+	// Allow access to local media files (e.g. images saved when LOCAL_MEDIA_PATH is set)
+	if strings.HasPrefix(ctx.Request().URL.Path, "/media/") {
+		return next(ctx)
+	}
 
 	configuredKey := strings.TrimSpace(env.Env.ApiKey)
 	if configuredKey == "" {

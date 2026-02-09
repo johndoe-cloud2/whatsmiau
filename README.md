@@ -226,6 +226,22 @@ When `WEBHOOK_URL` is set, the API sends a **`ready`** event (no subscription ne
 
 **Note:** Only events you subscribe to (in `webhook.events` when creating/updating the instance) are sent. API errors (e.g. "instance already exists", "context deadline exceeded") and internal library logs (e.g. "Successfully paired") are not webhook events and are never posted to the webhook URL.
 
+### Media (images, audio, documents, video) in webhooks
+
+For `messages.upsert` events, media messages include:
+
+- **Raw data from WhatsApp** (what the library receives): inside `data.message.imageMessage` (or `audioMessage`, `documentMessage`, `videoMessage`) you get `url`, `mediaKey`, `directPath`, `mimetype`, `caption`, etc. That media is **encrypted**; the URL is WhatsApp’s CDN and requires decryption with `mediaKey` (handled by the backend when it downloads).
+- **Decoded file** (image/audio/document/video already decrypted):
+  - If **`WEBHOOK_URL`** is set, the backend decodes media and adds **`decodedBase64`** in the same object (e.g. `data.message.imageMessage.decodedBase64`). You can decode it to get the file:
+    ```js
+    const buffer = Buffer.from(data.message.imageMessage.decodedBase64, 'base64');
+    require('fs').writeFileSync('image.jpg', buffer);
+    ```
+  - If the instance has **`webhook.base64: true`**, you also get `data.message.base64` and `data.message.imageMessage.decodedBase64`.
+  - If **GCS storage** is configured, you get **`decodedMediaUrl`** (e.g. `data.message.imageMessage.decodedMediaUrl`) with a public URL to the downloaded file, and optionally `data.message.mediaUrl`.
+
+So: use **`data.message.imageMessage`** for the raw WA payload, and **`data.message.imageMessage.decodedBase64`** or **`data.message.imageMessage.decodedMediaUrl`** to obtain the actual image file (when `WEBHOOK_URL` or webhook.base64 / storage is configured).
+
 
 ## Did you like project?
 Donate: https://buy.stripe.com/8x28wI5vKfPbe9b8ih1VK0f

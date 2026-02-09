@@ -1,0 +1,11 @@
+# Override solo para test-stack: guardar imágenes/audio en ./media del repo.
+# Uso: docker-compose -f docker-compose.yml -f docker-compose.test-stack.yml up -d
+# En producción no uses este archivo (no guardar medios en disco local).
+services:
+  whatsmiau:
+    environment:
+      LOCAL_MEDIA_PATH: /app/media
+      MEDIA_PUBLIC_URL: http://localhost:8080
+    volumes:
+      - whatsmeow:/app/data
+      - ./media:/app/media

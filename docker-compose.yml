@@ -36,7 +36,7 @@ services:
       # Para que los eventos del webhook lleguen a tu máquina (no a localhost del contenedor),
       # se usa host.docker.internal. Si en .env tienes WEBHOOK_URL, se usa .env; si no, este valor:
       WEBHOOK_URL: http://host.docker.internal:3456
-      # API_KEY, etc. vienen de .env (env_file)
+      # API_KEY, etc. vienen de .env (env_file). LOCAL_MEDIA_PATH solo en modo test (see docker-compose.test-stack.yml)
     volumes:
       - whatsmeow:/app/data
     depends_on:

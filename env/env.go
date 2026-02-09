@@ -28,6 +28,10 @@ type E struct {
 	GCSBucket  string `env:"GCS_BUCKET" envDefault:"whatsmiau"`
 	GCSURL     string `env:"GCS_URL" envDefault:"https://storage.googleapis.com"`
 
+	// Local media: save images/audio/etc. to a folder (e.g. ./media or /app/media). MEDIA_PUBLIC_URL is the base URL for links (e.g. http://localhost:8080).
+	LocalMediaPath string `env:"LOCAL_MEDIA_PATH" envDefault:""`
+	MediaPublicURL string `env:"MEDIA_PUBLIC_URL" envDefault:""`
+
 	GCL          string `json:"GCL_APP_NAME" envDefault:"whatsmiau-br-1"`
 	GCLEnabled   bool   `json:"GCL_ENABLED" envDefault:"false"`
 	GCLProjectID string `json:"GCL_PROJECT_ID"`

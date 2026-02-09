@@ -792,11 +792,15 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 	// Convert the WA protobuf message into our internal raw structure
 	messageType, raw, ci := s.parseWAMessage(m)
 
-	// Upload media (URL / Base64) when needed
+	// Upload media (URL / Base64) when needed; also set decoded fields inside the media object for convenience
 	switch messageType {
 	case "imageMessage":
 		if img := m.GetImageMessage(); img != nil {
 			raw.MediaURL, raw.Base64 = s.uploadMessageFile(ctx, instance, client, img, img.GetMimetype(), "")
+			if raw.ImageMessage != nil {
+				raw.ImageMessage.DecodedMediaUrl = raw.MediaURL
+				raw.ImageMessage.DecodedBase64 = raw.Base64
+			}
 		}
 	case "audioMessage":
 		if aud := m.GetAudioMessage(); aud != nil {
@@ -927,7 +931,9 @@ func (s *Whatsmiau) uploadMessageFile(ctx context.Context, instance *models.Inst
 	}
 
 	ext = extractExtFromFile(fileName, mimetype, tmpFile)
-	if instance.Webhook.Base64 != nil && *instance.Webhook.Base64 {
+	// Include base64 when instance has webhook.base64 or when using global WEBHOOK_URL (so webhook always gets decoded media)
+	includeBase64 := (instance.Webhook.Base64 != nil && *instance.Webhook.Base64) || env.Env.WebhookURL != ""
+	if includeBase64 {
 		data, err := io.ReadAll(tmpFile)
 		if err != nil {
 			zap.L().Error("failed to read image", zap.Error(err))

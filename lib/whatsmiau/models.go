@@ -9,12 +9,12 @@ import (
 type Wook string
 
 const (
-	WookMessagesUpsert    Wook = "messages.upsert"
-	WookMessagesUpdate    Wook = "messages.update"
-	WookContactsUpsert    Wook = "contacts.upsert"
-	WookSessionLost       Wook = "session.lost"
+	WookMessagesUpsert   Wook = "messages.upsert"
+	WookMessagesUpdate   Wook = "messages.update"
+	WookContactsUpsert   Wook = "contacts.upsert"
+	WookSessionLost      Wook = "session.lost"
 	WookConnectionUpdate Wook = "connection.update"
-	WookReady             Wook = "ready"
+	WookReady            Wook = "ready"
 )
 
 type WookEvent[data any] struct {
@@ -216,6 +216,7 @@ type WookVideoMessageRaw struct {
 }
 
 type WookImageMessageRaw struct {
+	// Raw fields from WhatsApp (media is encrypted; use decodedBase64 or decodedMediaUrl to get the file)
 	Url               string           `json:"url,omitempty"`
 	Mimetype          string           `json:"mimetype,omitempty"`
 	FileSha256        string           `json:"fileSha256,omitempty"`
@@ -230,6 +231,9 @@ type WookImageMessageRaw struct {
 	JpegThumbnail     string           `json:"jpegThumbnail,omitempty"`
 	ContextInfo       *FileContextInfo `json:"contextInfo,omitempty"`
 	ViewOnce          bool             `json:"viewOnce,omitempty"`
+	// Decoded file: set when instance has webhook.base64 (base64) or GCS storage (mediaUrl)
+	DecodedMediaUrl string `json:"decodedMediaUrl,omitempty"`
+	DecodedBase64   string `json:"decodedBase64,omitempty"`
 }
 type FileContextInfo struct {
 	DisappearingMode *ContextInfoDisappearingMode `json:"disappearingMode,omitempty"`

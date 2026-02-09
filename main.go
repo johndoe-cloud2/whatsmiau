@@ -47,6 +47,11 @@ func main() {
 	// Health endpoint for docker/ECS healthcheck (GET /); no auth required
 	app.GET("/", func(c echo.Context) error { return c.String(200, "ok") })
 
+	// Serve local media folder when LOCAL_MEDIA_PATH is set (e.g. test-stack saves images here)
+	if env.Env.LocalMediaPath != "" {
+		app.Static("/media", env.Env.LocalMediaPath)
+	}
+
 	routes.Load(app)
 
 	if env.Env.WebhookURL != "" {

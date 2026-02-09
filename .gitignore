@@ -6,3 +6,6 @@
 *.db
 scripts/aws-config.env
 TODO.md
+
+# Media files saved by the app when using LOCAL_MEDIA_PATH (folder is created, contents ignored)
+media/
