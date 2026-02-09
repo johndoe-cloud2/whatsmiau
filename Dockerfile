@@ -6,6 +6,7 @@ WORKDIR /app
 RUN apk add build-base sqlite-dev gcc musl-dev
 
 COPY go.mod go.sum ./
+COPY patches/ ./patches/
 RUN go mod download
 
 COPY . .
@@ -15,7 +16,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o whatsmiau main.go
 
 FROM alpine:latest
 
-RUN apk update && apk add --no-cache ffmpeg mailcap jq
+RUN apk update && apk add --no-cache ffmpeg mailcap jq wget
 
 WORKDIR /app
 

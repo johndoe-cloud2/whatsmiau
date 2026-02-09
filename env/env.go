@@ -14,7 +14,7 @@ type E struct {
 	RedisPassword string `env:"REDIS_PASSWORD"`
 	RedisTLS      bool   `env:"REDIS_TLS" envDefault:"false"`
 
-	ApiKey    string `env:"API_KEY" envDefault:""`
+	ApiKey string `env:"API_KEY" envDefault:""`
 	// ECS/minimal: use sqlite3 and DB_URL=file:/app/data/data.db?_foreign_keys=on (Dockerfile has /app/data)
 	DBDialect string `env:"DIALECT_DB" envDefault:"sqlite3"`
 	DBURL     string `env:"DB_URL" envDefault:"file:data.db?_foreign_keys=on"`

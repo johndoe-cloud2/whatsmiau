@@ -1,4 +1,4 @@
-// Router: single entrypoint that validates API secret and proxies requests to the correct backend using Redis (route:<id> and backends set).
+// Router: single entrypoint that validates API key (header apikey) and proxies requests to the correct backend using Redis (route:<id> and backends set).
 package main
 
 import (
@@ -21,12 +21,11 @@ const redisKeyBackends = "backends"
 const redisKeyRoutePrefix = "route:"
 
 type config struct {
-	Port              string `env:"PORT" envDefault:"8080"`
-	RedisURL          string `env:"REDIS_URL" envDefault:"localhost:6379"`
-	RedisPassword      string `env:"REDIS_PASSWORD"`
-	RedisTLS           bool   `env:"REDIS_TLS" envDefault:"false"`
-	APISecret          string `env:"API_SECRET" envDefault:""`
-	APISecretHeader    string `env:"API_SECRET_HEADER" envDefault:"X-Api-Secret"`
+	Port          string `env:"PORT" envDefault:"8080"`
+	RedisURL      string `env:"REDIS_URL" envDefault:"localhost:6379"`
+	RedisPassword string `env:"REDIS_PASSWORD"`
+	RedisTLS      bool   `env:"REDIS_TLS" envDefault:"false"`
+	APIKey        string `env:"API_KEY" envDefault:""`
 }
 
 func main() {
@@ -63,10 +62,9 @@ func main() {
 	}
 
 	handler := &routerHandler{
-		redis:    rdb,
-		proxy:    proxy,
-		secret:   cfg.APISecret,
-		header:   cfg.APISecretHeader,
+		redis:  rdb,
+		proxy:  proxy,
+		apiKey: cfg.APIKey,
 	}
 
 	addr := ":" + cfg.Port
@@ -76,16 +74,17 @@ func main() {
 	}
 }
 
+const apikeyHeader = "apikey"
+
 type routerHandler struct {
-	redis *redis.Client
-	proxy *httputil.ReverseProxy
-	secret string
-	header string
+	redis  *redis.Client
+	proxy  *httputil.ReverseProxy
+	apiKey string
 }
 
 func (h *routerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.secret != "" {
-		if r.Header.Get(h.header) != h.secret {
+	if key := strings.TrimSpace(h.apiKey); key != "" {
+		if r.Header.Get(apikeyHeader) != key {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

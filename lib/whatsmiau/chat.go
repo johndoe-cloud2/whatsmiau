@@ -53,10 +53,12 @@ type NumberExistsRequest struct {
 type NumberExistsResponse []Exists
 
 type Exists struct {
-	Exists bool   `json:"exists"`
-	Jid    string `json:"jid"`
-	Lid    string `json:"lid"`
-	Number string `json:"number"`
+	Exists        bool   `json:"exists"`
+	Jid           string `json:"jid"`
+	Lid           string `json:"lid"`
+	Number        string `json:"number"`
+	PushName      string `json:"pushName"`
+	ProfilePicUrl string `json:"profilePicUrl"`
 }
 
 func (s *Whatsmiau) NumberExists(ctx context.Context, data *NumberExistsRequest) (NumberExistsResponse, error) {
@@ -74,12 +76,50 @@ func (s *Whatsmiau) NumberExists(ctx context.Context, data *NumberExistsRequest)
 	for _, item := range resp {
 		jid, lid := s.GetJidLid(ctx, data.InstanceID, item.JID)
 
-		results = append(results, Exists{
+		entry := Exists{
 			Exists: item.IsIn,
 			Jid:    jid,
 			Lid:    lid,
 			Number: item.Query,
-		})
+		}
+
+		if item.IsIn {
+			// PushName: primero el que devuelve el servidor (nombre que el usuario puso en WhatsApp), luego store, VerifiedName, o número
+			if item.PushName != "" {
+				entry.PushName = item.PushName
+			}
+			if entry.PushName == "" {
+				if contact, err := client.Store.Contacts.GetContact(ctx, item.JID); err == nil {
+					switch {
+					case contact.PushName != "":
+						entry.PushName = contact.PushName
+					case contact.FullName != "":
+						entry.PushName = contact.FullName
+					case contact.FirstName != "":
+						entry.PushName = contact.FirstName
+					case contact.BusinessName != "":
+						entry.PushName = contact.BusinessName
+					}
+				}
+			}
+			if entry.PushName == "" && item.VerifiedName != nil && item.VerifiedName.Details != nil {
+				entry.PushName = item.VerifiedName.Details.GetVerifiedName()
+			}
+			// Si no tenemos ningún nombre, usar el número para que el cliente siempre tenga algo que mostrar
+			if entry.PushName == "" {
+				entry.PushName = item.Query
+			}
+
+			// Foto de perfil: solo URL (sin descargar para no ralentizar)
+			if pic, err := client.GetProfilePictureInfo(ctx, item.JID, &whatsmeow.GetProfilePictureParams{
+				Preview:     true,
+				IsCommunity: false,
+			}); err == nil && pic != nil && pic.URL != "" {
+				entry.ProfilePicUrl = pic.URL
+			}
+		}
+
+		results = append(results, entry)
 	}
 
 	return results, nil

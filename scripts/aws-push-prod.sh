@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Build both images, push to ECR, and force ECS services to deploy the new code.
-# Requires: Docker, AWS CLI, env loaded (source scripts/aws-config.env).
+# Loads: .env.production (repo root), then scripts/aws-config.env.
 # Usage: ./scripts/aws-push-prod.sh   or: make push-prod
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+[ -f "$REPO_ROOT/.env.production" ] && set -a && source "$REPO_ROOT/.env.production" && set +a
 source "$SCRIPT_DIR/aws-config.env" 2>/dev/null || true
 [ -n "$AWS_PROFILE" ] && echo "Using AWS profile: $AWS_PROFILE"
 STACK_NAME="${STACK_NAME:-whatsmiau}"

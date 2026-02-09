@@ -115,6 +115,58 @@ func (s *Whatsmiau) emit(body any, url string) {
 	s.emitter <- emitter{url, body}
 }
 
+// emitConnectionUpdate sends a connection.update event to the webhook when the device connects (pairing success or reconnect).
+// Sent when WEBHOOK_URL is set or when the instance has webhook URL and CONNECTION_UPDATE in webhook.events.
+func (s *Whatsmiau) emitConnectionUpdate(instanceID, remoteJID string) {
+	instance := s.getInstance(instanceID)
+	if instance == nil {
+		return
+	}
+	if !shouldEmitEvent(instance, "CONNECTION_UPDATE") {
+		return
+	}
+	url := getWebhookURL(instance)
+	if url == "" {
+		return
+	}
+	payload := &WookEvent[struct {
+		InstanceId string `json:"instanceId"`
+		RemoteJID  string `json:"remoteJid"`
+		State      string `json:"state"`
+	}]{
+		Instance: instanceID,
+		Data: &struct {
+			InstanceId string `json:"instanceId"`
+			RemoteJID  string `json:"remoteJid"`
+			State      string `json:"state"`
+		}{InstanceId: instanceID, RemoteJID: remoteJID, State: "open"},
+		DateTime: time.Now(),
+		Event:    WookConnectionUpdate,
+	}
+	s.emit(payload, url)
+}
+
+// EmitReady sends a "ready" event to the webhook when the API has finished starting.
+// Only sent if WEBHOOK_URL (env) is set.
+func (s *Whatsmiau) EmitReady() {
+	url := getWebhookURL(nil)
+	if url == "" {
+		zap.L().Info("WEBHOOK_URL not set, skipping ready event")
+		return
+	}
+	zap.L().Info("sending ready event to webhook", zap.String("url", url))
+	payload := &WookEvent[struct {
+		State string `json:"state"`
+	}]{
+		Data: &struct {
+			State string `json:"state"`
+		}{State: "open"},
+		DateTime: time.Now(),
+		Event:    WookReady,
+	}
+	s.emit(payload, url)
+}
+
 // getWebhookURL returns WEBHOOK_URL from env if set (ECS mode), else the instance's webhook URL.
 func getWebhookURL(instance *models.Instance) string {
 	if env.Env.WebhookURL != "" {
@@ -124,6 +176,57 @@ func getWebhookURL(instance *models.Instance) string {
 		return instance.Webhook.Url
 	}
 	return ""
+}
+
+// shouldEmitEvent returns true if we should send this event to the webhook: when using global WEBHOOK_URL we send all events; otherwise we respect instance.Webhook.Events.
+func shouldEmitEvent(instance *models.Instance, eventName string) bool {
+	if env.Env.WebhookURL != "" {
+		return true
+	}
+	if instance == nil {
+		return false
+	}
+	for _, e := range instance.Webhook.Events {
+		if e == eventName {
+			return true
+		}
+	}
+	return false
+}
+
+// EmitMessageSent sends a MESSAGES_UPSERT event to the webhook when a message is sent via the API.
+// Sent when WEBHOOK_URL is set or when the instance has webhook URL and MESSAGES_UPSERT in webhook.events.
+// When instance is nil, only emits if WEBHOOK_URL env is set (so message-sent events are never dropped when using global webhook).
+func (s *Whatsmiau) EmitMessageSent(instance *models.Instance, instanceID, remoteJID, messageID string, timestamp time.Time, messageType string, raw *WookMessageRaw, participant string) {
+	url := getWebhookURL(instance)
+	if url == "" {
+		return
+	}
+	if instance != nil && !shouldEmitEvent(instance, "MESSAGES_UPSERT") {
+		return
+	}
+	key := &WookKey{
+		RemoteJid:   remoteJID,
+		FromMe:      true,
+		Id:          messageID,
+		Participant: participant,
+	}
+	payload := &WookEvent[WookMessageData]{
+		Instance: instanceID,
+		Data: &WookMessageData{
+			Key:              key,
+			Status:           "sent",
+			Message:          raw,
+			MessageType:      messageType,
+			MessageTimestamp: int(timestamp.Unix()),
+			InstanceId:       instanceID,
+			Source:           "api",
+		},
+		DateTime: timestamp,
+		Event:    WookMessagesUpsert,
+	}
+	zap.L().Debug("emitting message sent to webhook", zap.String("instance", instanceID), zap.String("event", string(WookMessagesUpsert)))
+	s.emit(payload, url)
 }
 
 func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
@@ -143,6 +246,10 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 			}
 
 			switch e := evt.(type) {
+			case *events.Connected:
+				if client, ok := s.clients.Load(id); ok && client.Store != nil && client.Store.ID != nil {
+					s.emitConnectionUpdate(id, client.Store.ID.String())
+				}
 			case *events.LoggedOut:
 				s.handleLoggedOut(id)
 			case *events.Message:
@@ -171,6 +278,10 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 func (s *Whatsmiau) handleLoggedOut(id string) {
 	ctx := context.Background()
 
+	// Get instance and webhook URL before deleting (so we can notify with instance's webhook if set)
+	instance := s.getInstance(id)
+	webhookURL := getWebhookURL(instance)
+
 	client, ok := s.clients.Load(id)
 	if ok {
 		if err := s.deleteDeviceIfExists(ctx, client); err != nil {
@@ -190,12 +301,14 @@ func (s *Whatsmiau) handleLoggedOut(id string) {
 			zap.L().Warn("failed to delete route from Redis", zap.String("instance", id), zap.Error(err))
 		}
 	}
-	if webhookURL := getWebhookURL(nil); webhookURL != "" {
+	if webhookURL != "" {
 		payload := &WookEvent[struct {
 			InstanceId string `json:"instanceId"`
 		}]{
 			Instance: id,
-			Data:     &struct{ InstanceId string `json:"instanceId"` }{InstanceId: id},
+			Data: &struct {
+				InstanceId string `json:"instanceId"`
+			}{InstanceId: id},
 			DateTime: time.Now(),
 			Event:    WookSessionLost,
 		}
@@ -203,7 +316,7 @@ func (s *Whatsmiau) handleLoggedOut(id string) {
 	}
 }
 func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *events.Message, eventMap map[string]bool) {
-	if !eventMap["MESSAGES_UPSERT"] {
+	if !shouldEmitEvent(instance, "MESSAGES_UPSERT") {
 		return
 	}
 
@@ -244,7 +357,7 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 }
 
 func (s *Whatsmiau) handleReceiptEvent(id string, instance *models.Instance, e *events.Receipt, eventMap map[string]bool) {
-	if !eventMap["MESSAGES_UPDATE"] {
+	if !shouldEmitEvent(instance, "MESSAGES_UPDATE") {
 		return
 	}
 
@@ -270,7 +383,7 @@ func (s *Whatsmiau) handleReceiptEvent(id string, instance *models.Instance, e *
 }
 
 func (s *Whatsmiau) handleBusinessNameEvent(id string, instance *models.Instance, e *events.BusinessName, eventMap map[string]bool) {
-	if !eventMap["CONTACTS_UPSERT"] {
+	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
 		return
 	}
 
@@ -291,7 +404,7 @@ func (s *Whatsmiau) handleBusinessNameEvent(id string, instance *models.Instance
 }
 
 func (s *Whatsmiau) handleContactEvent(id string, instance *models.Instance, e *events.Contact, eventMap map[string]bool) {
-	if !eventMap["CONTACTS_UPSERT"] {
+	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
 		return
 	}
 
@@ -316,7 +429,7 @@ func (s *Whatsmiau) handleContactEvent(id string, instance *models.Instance, e *
 }
 
 func (s *Whatsmiau) handlePictureEvent(id string, instance *models.Instance, e *events.Picture, eventMap map[string]bool) {
-	if !eventMap["CONTACTS_UPSERT"] {
+	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
 		return
 	}
 
@@ -336,7 +449,7 @@ func (s *Whatsmiau) handlePictureEvent(id string, instance *models.Instance, e *
 }
 
 func (s *Whatsmiau) handleHistorySyncEvent(id string, instance *models.Instance, e *events.HistorySync, eventMap map[string]bool) {
-	if !eventMap["CONTACTS_UPSERT"] {
+	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
 		return
 	}
 
@@ -356,7 +469,7 @@ func (s *Whatsmiau) handleHistorySyncEvent(id string, instance *models.Instance,
 }
 
 func (s *Whatsmiau) handleGroupInfoEvent(id string, instance *models.Instance, e *events.GroupInfo, eventMap map[string]bool) {
-	if !eventMap["CONTACTS_UPSERT"] {
+	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
 		return
 	}
 
@@ -381,7 +494,7 @@ func (s *Whatsmiau) handleGroupInfoEvent(id string, instance *models.Instance, e
 }
 
 func (s *Whatsmiau) handlePushNameEvent(id string, instance *models.Instance, e *events.PushName, eventMap map[string]bool) {
-	if !eventMap["CONTACTS_UPSERT"] {
+	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
 		return
 	}
 

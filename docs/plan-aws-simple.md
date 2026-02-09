@@ -1,65 +1,65 @@
-# Plan (simple y funcional): API única en AWS
+# Plan (simple and functional): Single API on AWS
 
-## Objetivo
+## Goal
 
-Una sola API pública. El **router** valida API secret y envía cada petición al **backend ECS** correcto según Redis. Cada backend: SQLite en el mismo contenedor, **WEBHOOK_URL** por env, mínimo 1 tarea y escalar cuando CPU o RAM > 80%. Si se pierde la sesión de WhatsApp: borrar instancia y ruta en Redis y avisar al webhook.
-
----
-
-## Arquitectura (mínima)
-
-- **Router**: valida header (API secret), busca en Redis `route:<instance_id>` → URL del backend; si no hay instance_id (ej. crear instancia), elige uno del set `backends` y hace proxy. Solo proxy HTTP.
-- **Redis**: `route:<instance_id>` = URL del backend; `backends` = SET de URLs de backends (cada uno se registra al arranque).
-- **Backend**: la app actual; SQLite en `/app/data`; al crear instancia escribe `route:<id>` y está en `backends`; al perder sesión borra instancia + ruta y envía evento al WEBHOOK_URL.
+One public API. The **router** validates API key (header `apikey`) and sends each request to the correct **ECS backend** via Redis. Each backend: SQLite in the same container, **WEBHOOK_URL** from env, minimum 1 task and scale when CPU or RAM > 80%. If a WhatsApp session is lost: delete instance and route in Redis and notify the webhook.
 
 ---
 
-## 1. Router (mínimo)
+## Architecture (minimal)
 
-- Validar header: nombre y valor en env (`API_SECRET_HEADER`, `API_SECRET`). Si falla → 401.
-- De la ruta sacar `instance_id` cuando exista (ej. `/v1/instance/XXX/...` → XXX).
-- Si hay `instance_id`: `GET route:<instance_id>` en Redis. Si no hay valor → 503.
-- Si no hay `instance_id` (ej. POST crear): `SMEMBERS backends`, elegir uno (ej. el primero) y hacer proxy ahí.
-- Proxy: reenviar método, path, body y headers relevantes al backend; devolver respuesta.
-- Env: `REDIS_URL`, `API_SECRET`, `API_SECRET_HEADER`. Un solo binario en Go, sin DB.
+- **Router**: validates header `apikey`, looks up Redis `route:<instance_id>` → backend URL; if there is no instance_id (e.g. create instance), picks one from the `backends` set and proxies. HTTP proxy only.
+- **Redis**: `route:<instance_id>` = backend URL; `backends` = SET of backend URLs (each registers on startup).
+- **Backend**: current app; SQLite in `/app/data`; on instance create writes `route:<id>` and is in `backends`; on session loss deletes instance + route and sends event to WEBHOOK_URL.
 
 ---
 
-## 2. Cambios en la API (backends)
+## 1. Router (minimal)
 
-- **Env**: `WEBHOOK_URL` (todos los eventos a esta URL), `BACKEND_PUBLIC_URL` (URL con la que este contenedor es alcanzable). Auth en backend opcional si solo recibe tráfico del router en red privada.
-- **Webhook**: si `WEBHOOK_URL` está definido, usarlo siempre al emitir; si no, usar `instance.Webhook.Url` (comportamiento actual). Un solo cambio en `lib/whatsmiau/event_emitter.go`.
-- **Redis**: clave `route:<instance_id>` = `BACKEND_PUBLIC_URL`. Set `backends`: al arranque `SADD backends <BACKEND_PUBLIC_URL>`. Tras crear instancia `SET route:<id> <BACKEND_PUBLIC_URL>`.
-- **Al perder sesión** (`handleLoggedOut`): (1) borrar device y cliente como ahora, (2) `repo.Delete(ctx, id)`, (3) `DEL route:<id>`, (4) POST a WEBHOOK_URL con evento `SESSION_LOST` y `instance_id`.
-- **DB**: SQLite por defecto: `DIALECT_DB=sqlite3`, `DB_URL=file:/app/data/data.db?_foreign_keys=on`. El Dockerfile ya tiene `/app/data`.
-
----
-
-## 3. CloudFormation (mínimo)
-
-- **VPC**: subnets pública y privada; NAT para que los backends lleguen a WhatsApp.
-- **Redis**: ElastiCache Redis, 1 nodo, en subnets privadas.
-- **ECS**: cluster; 1 task definition Router (imagen router, env Redis + secret); 1 task definition Backend (imagen whatsmiau, env Redis + WEBHOOK_URL + BACKEND_PUBLIC_URL + SQLite).
-- **BACKEND_PUBLIC_URL**: script de entrypoint que lea la IP del task por metadata ECS, exporte `BACKEND_PUBLIC_URL=http://<ip>:8080` y ejecute el binario. Una sola imagen backend.
-- **Servicios**: Router 1 tarea detrás del ALB. Backend desired count 1; scaling si CPU o memoria > 80% (máximo según necesidad).
-- **ALB**: listener al Router (puerto 80; HTTPS opcional después). Sin Cloud Map: el router solo usa Redis (route + backends).
+- Validate header `apikey` with value from env (`API_KEY`). On failure → 401.
+- Extract `instance_id` from path when present (e.g. `/v1/instance/XXX/...` → XXX).
+- If `instance_id` present: `GET route:<instance_id>` in Redis. If no value → 503.
+- If no `instance_id` (e.g. POST create): `SMEMBERS backends`, pick one (e.g. first) and proxy there.
+- Proxy: forward method, path, body and relevant headers to backend; return response.
+- Env: `REDIS_URL`, `API_KEY`. Single Go binary, no DB.
 
 ---
 
-## 4. Env por componente
+## 2. API changes (backends)
 
-- **Router**: `REDIS_URL`, `API_SECRET`, `API_SECRET_HEADER`.
-- **Backend**: `REDIS_URL`, `WEBHOOK_URL`, `BACKEND_PUBLIC_URL`, `DIALECT_DB=sqlite3`, `DB_URL=file:/app/data/data.db?_foreign_keys=on`, `PORT`.
+- **Env**: `WEBHOOK_URL` (all events to this URL), `BACKEND_PUBLIC_URL` (URL at which this container is reachable). Auth on backend optional if it only receives traffic from the router on private network.
+- **Webhook**: if `WEBHOOK_URL` is set, always use it when emitting; otherwise use `instance.Webhook.Url` (current behaviour). Single change in `lib/whatsmiau/event_emitter.go`.
+- **Redis**: key `route:<instance_id>` = `BACKEND_PUBLIC_URL`. Set `backends`: on startup `SADD backends <BACKEND_PUBLIC_URL>`. After creating instance `SET route:<id> <BACKEND_PUBLIC_URL>`.
+- **On session loss** (`handleLoggedOut`): (1) delete device and client as now, (2) `repo.Delete(ctx, id)`, (3) `DEL route:<id>`, (4) POST to WEBHOOK_URL with event `SESSION_LOST` and `instance_id`.
+- **DB**: SQLite by default: `DIALECT_DB=sqlite3`, `DB_URL=file:/app/data/data.db?_foreign_keys=on`. Dockerfile already has `/app/data`.
 
 ---
 
-## 5. Orden de implementación (todos)
+## 3. CloudFormation (minimal)
 
-- [ ] **backend-env-webhook**: Añadir env WEBHOOK_URL y BACKEND_PUBLIC_URL; usar WEBHOOK_URL al emitir en event_emitter.
-- [ ] **backend-redis-route**: Registro en Redis (SADD backends al arranque, SET route:\<id\> al crear instancia).
-- [ ] **backend-logged-out**: handleLoggedOut con repo.Delete + DEL route + evento SESSION_LOST al webhook.
-- [ ] **backend-sqlite-defaults**: Defaults SQLite en env para despliegue ECS (DIALECT_DB, DB_URL).
-- [ ] **router-service**: Servicio Go con auth por header, lookup Redis (route/backends), proxy HTTP.
-- [ ] **backend-entrypoint**: Script que setea BACKEND_PUBLIC_URL desde metadata ECS y arranca la API.
-- [ ] **cloudformation**: VPC, Redis, ECS router+backend, ALB, scaling CPU/RAM >80%, mín 1 tarea.
-- [ ] **readme-deploy**: README o doc breve con env y pasos de despliegue.
+- **VPC**: public and private subnets; NAT so backends can reach WhatsApp.
+- **Redis**: ElastiCache Redis, 1 node, in private subnets.
+- **ECS**: cluster; 1 task definition Router (router image, env Redis + secret); 1 task definition Backend (whatsmiau image, env Redis + WEBHOOK_URL + BACKEND_PUBLIC_URL + SQLite).
+- **BACKEND_PUBLIC_URL**: entrypoint script reads task IP from ECS metadata, exports `BACKEND_PUBLIC_URL=http://<ip>:8080` and runs the binary. Single backend image.
+- **Services**: Router 1 task behind ALB. Backend desired count 1; scaling when CPU or memory > 80% (max as needed).
+- **ALB**: listener to Router (port 80; HTTPS optional later). No Cloud Map: router only uses Redis (route + backends).
+
+---
+
+## 4. Env per component
+
+- **Router**: `REDIS_URL`, `API_KEY`.
+- **Backend**: `REDIS_URL`, `API_KEY`, `WEBHOOK_URL`, `BACKEND_PUBLIC_URL`, `DIALECT_DB=sqlite3`, `DB_URL=file:/app/data/data.db?_foreign_keys=on`, `PORT`.
+
+---
+
+## 5. Implementation order (todos)
+
+- [ ] **backend-env-webhook**: Add env WEBHOOK_URL and BACKEND_PUBLIC_URL; use WEBHOOK_URL when emitting in event_emitter.
+- [ ] **backend-redis-route**: Register in Redis (SADD backends on startup, SET route:\<id\> on instance create).
+- [ ] **backend-logged-out**: handleLoggedOut with repo.Delete + DEL route + SESSION_LOST event to webhook.
+- [ ] **backend-sqlite-defaults**: SQLite defaults in env for ECS deployment (DIALECT_DB, DB_URL).
+- [ ] **router-service**: Go service with header auth, Redis lookup (route/backends), HTTP proxy.
+- [ ] **backend-entrypoint**: Script that sets BACKEND_PUBLIC_URL from ECS metadata and starts the API.
+- [ ] **cloudformation**: VPC, Redis, ECS router+backend, ALB, scaling CPU/RAM >80%, min 1 task.
+- [ ] **readme-deploy**: README or short doc with env and deploy steps.

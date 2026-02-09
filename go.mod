@@ -91,4 +91,8 @@ require (
 	google.golang.org/grpc v1.74.2 // indirect
 )
 
-//replace go.mau.fi/whatsmeow => ../whatsmeow
+// Use local whatsmeow with PushName (notify) from usync contact node for IsOnWhatsApp
+replace go.mau.fi/whatsmeow => ./patches/whatsmeow
+
+// Use local whatsmeow with PushName (notify) from usync contact node for IsOnWhatsApp
+replace go.mau.fi/whatsmeow => ./patches/whatsmeow

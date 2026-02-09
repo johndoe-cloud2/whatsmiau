@@ -44,7 +44,14 @@ func main() {
 	app.Pre(middleware.RemoveTrailingSlash())
 	app.Pre(middleware.CORS())
 
+	// Health endpoint for docker/ECS healthcheck (GET /); no auth required
+	app.GET("/", func(c echo.Context) error { return c.String(200, "ok") })
+
 	routes.Load(app)
+
+	if env.Env.WebhookURL != "" {
+		whatsmiau.Get().EmitReady()
+	}
 
 	port := ":" + env.Env.Port
 	zap.L().Info("starting server...", zap.String("port", port))

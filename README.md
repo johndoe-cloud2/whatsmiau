@@ -53,36 +53,36 @@ To get a local copy up and running follow these simple steps.
 
 ## Running with Docker (Router + Backend + Redis)
 
-Run the full stack locally (igual que en producción: Router + Backend + Redis):
+Run the full stack locally (same as production: Router + Backend + Redis):
 
-1. **Levantar y probar todo de una vez:**
+1. **Bring up and test in one go:**
    ```sh
    make test-stack
    ```
-   (hace `docker-compose up -d --build`, espera a que respondan y ejecuta list/create/status contra el router.)
+   (runs `docker-compose up -d --build`, waits for services, then runs list/create/status against the router.)
 
-2. **O a mano:** `docker-compose up -d --build`, luego:
+2. **Or manually:** `docker-compose up -d --build`, then:
    ```sh
-   curl -H "X-Api-Secret: local-secret" http://localhost:8080/v1/instance
-   curl -X POST -H "X-Api-Secret: local-secret" -H "Content-Type: application/json" \
+   curl -H "apikey: local-apikey" http://localhost:8080/v1/instance
+   curl -X POST -H "apikey: local-apikey" -H "Content-Type: application/json" \
      -d '{"instanceName":"my-instance"}' http://localhost:8080/v1/instance
    ```
 
-- Router: `http://localhost:8080` (envs in `docker-compose.yml`: `API_SECRET=local-secret`, `REDIS_URL=redis:6379`).
+- Router: `http://localhost:8080` (envs in `docker-compose.yml`: `API_KEY=local-apikey`, `REDIS_URL=redis:6379`).
 - Backend (direct): `http://localhost:8081` (optional; normally you use the router).
 - Redis: `localhost:6379` (for local `go run`).
 
 **View logs:** `docker-compose logs -f`  
 **Stop:** `docker-compose down`
 
-To run **without Docker** (backend only): install Redis, copy `env.local.example` to `.env`, then `go run main.go`. To run the router as well: `go run ./cmd/router/` in another terminal (use the same `.env` or set `REDIS_URL`, `API_SECRET`, `API_SECRET_HEADER`).
+To run **without Docker** (backend only): install Redis, copy `env.local.example` to `.env`, then `go run main.go`. To run the router as well: `go run ./cmd/router/` in another terminal (use the same `.env` or set `REDIS_URL`, `API_KEY`).
 
 ## AWS deployment (single API with Router + ECS)
 
 To run a single public API that routes requests to the correct backend using Redis (min 1 backend, scale when CPU/RAM > 80%, SQLite per backend, webhook per env, session loss cleanup and notification):
 
 - See **[docs/deploy-aws.md](docs/deploy-aws.md)** for environment variables and step-by-step deploy.
-- **Scripts:** `scripts/aws-create-stack.sh`, `scripts/aws-update-stack.sh`, `scripts/aws-delete-stack.sh`, `scripts/aws-push-prod.sh`. Copy `scripts/aws-config.env.example` to `scripts/aws-config.env` and set `API_SECRET`, `WEBHOOK_URL`, and `ECR_REGISTRY` (or `AWS_ACCOUNT_ID`).
+- **Scripts:** `scripts/aws-create-stack.sh`, `scripts/aws-update-stack.sh`, `scripts/aws-delete-stack.sh`, `scripts/aws-push-prod.sh`. Copy `.env.production.example` to `.env.production` and set `API_KEY`, `WEBHOOK_URL`, and `ECR_REGISTRY` (or `AWS_ACCOUNT_ID`).
 - **Makefile:** `make infra-create` (first time), `make push-prod` (build + push images + roll out new code), `make infra-update`, `make infra-destroy`.
 - **Templates:** `cloudformation/template.yaml` (VPC, Redis, ECS router + backend, ALB, auto scaling).
 
@@ -175,6 +175,7 @@ curl -X POST 'http://localhost:8080/v1/message/sendText/my-instance' \
 Same Pattern: https://www.postman.com/agenciadgcode/evolution-api/overview
 | Method | Path                                      | Description                 |
 |--------|-------------------------------------------|-----------------------------|
+| GET    | /v1                                       | API info and version        |
 | POST   | /v1/instance                            | Create a new instance       |
 | GET    | /v1/instance                            | List all instances          |
 | POST   | /v1/instance/:id/connect                | Connect to an instance      |
@@ -196,6 +197,7 @@ Same Pattern: https://www.postman.com/agenciadgcode/evolution-api/overview
 | POST   | /v1/instance/create                | Create a new instance       |
 | GET    | /v1/instance/fetchInstances        | List all instances          |
 | GET    | /v1/instance/connect/:id           | Connect to an instance      |
+| GET    | /v1/instance/connect/:id/image     | Get connection QR as image |
 | GET    | /v1/instance/connectionState/:id   | Get instance status         |
 | DELETE | /v1/instance/logout/:id            | Logout from an instance     |
 | DELETE | /v1/instance/delete/:id            | Delete an instance          |
@@ -212,11 +214,17 @@ Same Pattern: https://www.postman.com/agenciadgcode/evolution-api/overview
 
 The application can send webhook events for the following actions:
 
-| Event             | Description                                         |
-|-------------------|-----------------------------------------------------|
-| `MESSAGES_UPSERT` | Triggered when a new message is received.           |
-| `MESSAGES_UPDATE` | Triggered when a message status changes (e.g., read). |
-| `CONTACTS_UPSERT` | Triggered when a contact is created or updated.     |
+| Event                | Description                                                         |
+|----------------------|---------------------------------------------------------------------|
+| `MESSAGES_UPSERT`   | Triggered when a new message is received.                           |
+| `MESSAGES_UPDATE`   | Triggered when a message status changes (e.g., read).                 |
+| `CONTACTS_UPSERT`   | Triggered when a contact is created or updated.                     |
+| `CONNECTION_UPDATE` | Triggered when the device connects (pairing/QR success).            |
+| `SESSION_LOST`      | Triggered when the WhatsApp session is lost (Router/Redis setup).    |
+
+When `WEBHOOK_URL` is set, the API sends a **`ready`** event (no subscription needed) once at startup when the server has finished initializing and is about to listen.
+
+**Note:** Only events you subscribe to (in `webhook.events` when creating/updating the instance) are sent. API errors (e.g. "instance already exists", "context deadline exceeded") and internal library logs (e.g. "Successfully paired") are not webhook events and are never posted to the webhook URL.
 
 
 ## Did you like project?

@@ -33,6 +33,20 @@ func NewInstances(repository interfaces.InstanceRepository, whatsmiau *whatsmiau
 	}
 }
 
+// instanceWithEffectiveWebhook returns a copy of the instance with Webhook.Url set from env WEBHOOK_URL
+// when the instance has no per-instance webhook URL, so API responses show where events are sent.
+func instanceWithEffectiveWebhook(instance *models.Instance) *models.Instance {
+	if instance == nil {
+		return nil
+	}
+	out := *instance
+	out.Webhook = instance.Webhook
+	if env.Env.WebhookURL != "" && out.Webhook.Url == "" {
+		out.Webhook.Url = env.Env.WebhookURL
+	}
+	return &out
+}
+
 func (s *Instance) Create(ctx echo.Context) error {
 	var request dto.CreateInstanceRequest
 	if err := ctx.Bind(&request); err != nil {
@@ -79,7 +93,7 @@ func (s *Instance) Create(ctx echo.Context) error {
 	}
 
 	return ctx.JSON(http.StatusCreated, dto.CreateInstanceResponse{
-		Instance: request.Instance,
+		Instance: instanceWithEffectiveWebhook(request.Instance),
 	})
 }
 
@@ -111,7 +125,7 @@ func (s *Instance) Update(ctx echo.Context) error {
 	}
 
 	return ctx.JSON(http.StatusCreated, dto.UpdateInstanceResponse{
-		Instance: instance,
+		Instance: instanceWithEffectiveWebhook(instance),
 	})
 }
 
@@ -139,7 +153,7 @@ func (s *Instance) List(ctx echo.Context) error {
 		}
 
 		response = append(response, dto.ListInstancesResponse{
-			Instance:     &instance,
+			Instance:     instanceWithEffectiveWebhook(&instance),
 			OwnerJID:     jid.ToNonAD().String(),
 			InstanceName: instance.ID,
 		})

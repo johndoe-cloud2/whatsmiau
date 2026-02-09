@@ -62,6 +62,9 @@ func (s *Whatsmiau) SendText(ctx context.Context, data *SendText) (*SendTextResp
 		return nil, err
 	}
 
+	instance := s.getInstance(data.InstanceID)
+	s.EmitMessageSent(instance, data.InstanceID, data.RemoteJID.ToNonAD().String(), res.ID, res.Timestamp, "conversation", &WookMessageRaw{Conversation: data.Text}, "")
+
 	return &SendTextResponse{
 		ID:        res.ID,
 		CreatedAt: res.Timestamp,
@@ -128,6 +131,9 @@ func (s *Whatsmiau) SendAudio(ctx context.Context, data *SendAudioRequest) (*Sen
 		return nil, err
 	}
 
+	instance := s.getInstance(data.InstanceID)
+	s.EmitMessageSent(instance, data.InstanceID, data.RemoteJID.ToNonAD().String(), res.ID, res.Timestamp, "audioMessage", &WookMessageRaw{AudioMessage: &WookAudioMessageRaw{Mimetype: "audio/ogg; codecs=opus"}}, "")
+
 	return &SendAudioResponse{
 		ID:        res.ID,
 		CreatedAt: res.Timestamp,
@@ -187,6 +193,9 @@ func (s *Whatsmiau) SendDocument(ctx context.Context, data *SendDocumentRequest)
 	if err != nil {
 		return nil, err
 	}
+
+	instance := s.getInstance(data.InstanceID)
+	s.EmitMessageSent(instance, data.InstanceID, data.RemoteJID.ToNonAD().String(), res.ID, res.Timestamp, "documentMessage", &WookMessageRaw{DocumentMessage: &WookDocumentMessageRaw{Mimetype: data.Mimetype, FileName: data.FileName, Caption: data.Caption}}, "")
 
 	return &SendDocumentResponse{
 		ID:        res.ID,
@@ -249,6 +258,9 @@ func (s *Whatsmiau) SendImage(ctx context.Context, data *SendImageRequest) (*Sen
 		return nil, err
 	}
 
+	instance := s.getInstance(data.InstanceID)
+	s.EmitMessageSent(instance, data.InstanceID, data.RemoteJID.ToNonAD().String(), res.ID, res.Timestamp, "imageMessage", &WookMessageRaw{ImageMessage: &WookImageMessageRaw{Mimetype: data.Mimetype, Caption: data.Caption}}, "")
+
 	return &SendImageResponse{
 		ID:        res.ID,
 		CreatedAt: res.Timestamp,
@@ -296,6 +308,15 @@ func (s *Whatsmiau) SendReaction(ctx context.Context, data *SendReactionRequest)
 	if err != nil {
 		return nil, err
 	}
+
+	participant := ""
+	if data.FromMe {
+		participant = data.RemoteJID.ToNonAD().String()
+	} else {
+		participant = sender.ToNonAD().String()
+	}
+	instance := s.getInstance(data.InstanceID)
+	s.EmitMessageSent(instance, data.InstanceID, data.RemoteJID.ToNonAD().String(), res.ID, res.Timestamp, "reactionMessage", &WookMessageRaw{ReactionMessage: &ReactionMessageRaw{Text: data.Reaction, Key: &WookKey{Id: data.MessageID, RemoteJid: data.RemoteJID.ToNonAD().String(), FromMe: data.FromMe, Participant: participant}}}, participant)
 
 	return &SendReactionResponse{
 		ID:        res.ID,

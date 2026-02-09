@@ -2,18 +2,25 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/verbeux-ai/whatsmiau/env"
 )
 
 func Auth(ctx echo.Context, next echo.HandlerFunc) error {
-	gotApikey := ctx.Request().Header.Get("apikey")
-	if len(env.Env.ApiKey) == 0 {
+	// Allow unauthenticated health checks (docker/ECS healthcheck hits GET /)
+	if ctx.Request().URL.Path == "/" || ctx.Request().URL.Path == "/health" {
 		return next(ctx)
 	}
 
-	if gotApikey != env.Env.ApiKey {
+	configuredKey := strings.TrimSpace(env.Env.ApiKey)
+	if configuredKey == "" {
+		return next(ctx)
+	}
+
+	gotApikey := ctx.Request().Header.Get("apikey")
+	if gotApikey != configuredKey {
 		return echo.NewHTTPError(http.StatusUnauthorized)
 	}
 

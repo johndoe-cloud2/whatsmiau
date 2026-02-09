@@ -1,5 +1,6 @@
-# Local stack: igual que en producción (router + backend + redis).
-# Probar todo: make test-stack   o: ./scripts/test-stack.sh
+# Local stack: router (8080) + backend (8081) + redis.
+# Un solo puerto público: 8080 = router. El 8081 es solo para depurar el backend directo.
+# Run: make test-stack   o: ./scripts/test-stack.sh
 services:
   router:
     build:
@@ -11,15 +12,19 @@ services:
     environment:
       PORT: "8080"
       REDIS_URL: redis:6379
-      API_SECRET: local-secret
-      API_SECRET_HEADER: X-Api-Secret
+      # API_KEY: sin definir = no pide auth en local; en producción definir en .env o ECS
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      whatsmiau:
+        condition: service_started
     restart: unless-stopped
 
   whatsmiau:
     build: .
     container_name: whatsmiau
+    env_file:
+      - .env
     ports:
       - "8081:8080"
     environment:
@@ -27,8 +32,11 @@ services:
       REDIS_URL: redis:6379
       DIALECT_DB: sqlite3
       DB_URL: file:/app/data/data.db?_foreign_keys=on
-      WEBHOOK_URL: ""
       BACKEND_PUBLIC_URL: http://whatsmiau:8080
+      # Para que los eventos del webhook lleguen a tu máquina (no a localhost del contenedor),
+      # se usa host.docker.internal. Si en .env tienes WEBHOOK_URL, se usa .env; si no, este valor:
+      WEBHOOK_URL: http://host.docker.internal:3456
+      # API_KEY, etc. vienen de .env (env_file)
     volumes:
       - whatsmeow:/app/data
     depends_on:
@@ -36,7 +44,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:latest
+    image: redis:7-alpine
     container_name: redis
     ports:
       - "6379:6379"

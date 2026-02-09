@@ -294,6 +294,7 @@ func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string) {
 				}); err != nil {
 					zap.L().Error("failed to update instance after login", zap.Error(err))
 				}
+				s.emitConnectionUpdate(id, client.Store.ID.String())
 				s.qrCache.Delete(id)
 				return
 			}

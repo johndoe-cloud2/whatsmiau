@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Update CloudFormation stack (template or parameters).
-# Requires: AWS CLI, env loaded (source scripts/aws-config.env).
+# Loads: .env.production (repo root), then scripts/aws-config.env.
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CF_DIR="$REPO_ROOT/cloudformation"
 
+[ -f "$REPO_ROOT/.env.production" ] && set -a && source "$REPO_ROOT/.env.production" && set +a
 source "$SCRIPT_DIR/aws-config.env" 2>/dev/null || true
 STACK_NAME="${STACK_NAME:-whatsmiau}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -13,7 +14,7 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 ECR_REGISTRY="${ECR_REGISTRY:-}"
 ECR_REPO_BACKEND="${ECR_REPO_BACKEND:-whatsmiau}"
 ECR_REPO_ROUTER="${ECR_REPO_ROUTER:-whatsmiau-router}"
-API_SECRET="${API_SECRET:-}"
+API_KEY="${API_KEY:-}"
 WEBHOOK_URL="${WEBHOOK_URL:-}"
 
 if [ -z "$ECR_REGISTRY" ]; then
@@ -24,16 +25,16 @@ BACKEND_IMAGE="${ECR_REGISTRY}/${ECR_REPO_BACKEND}:latest"
 ROUTER_IMAGE="${ECR_REGISTRY}/${ECR_REPO_ROUTER}:latest"
 
 # Reuse current stack parameters if not set in env
-if [ -z "$API_SECRET" ] || [ -z "$WEBHOOK_URL" ]; then
+if [ -z "$API_KEY" ] || [ -z "$WEBHOOK_URL" ]; then
   MAP=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" --query 'Stacks[0].Parameters[*].[ParameterKey,ParameterValue]' --output text 2>/dev/null || true)
-  [ -z "$API_SECRET" ] && API_SECRET=$(echo "$MAP" | awk '$1=="ApiSecret"{print $2}')
+  [ -z "$API_KEY" ] && API_KEY=$(echo "$MAP" | awk '$1=="ApiKey"{print $2}')
   [ -z "$WEBHOOK_URL" ] && WEBHOOK_URL=$(echo "$MAP" | awk '$1=="WebhookURL"{print $2}')
 fi
-API_SECRET="${API_SECRET:-placeholder}"
+API_KEY="${API_KEY:-placeholder}"
 WEBHOOK_URL="${WEBHOOK_URL:-https://example.com/webhook}"
 
 PARAMS=(
-  "ParameterKey=ApiSecret,ParameterValue=$API_SECRET"
+  "ParameterKey=ApiKey,ParameterValue=$API_KEY"
   "ParameterKey=WebhookURL,ParameterValue=$WEBHOOK_URL"
   "ParameterKey=BackendImage,ParameterValue=$BACKEND_IMAGE"
   "ParameterKey=RouterImage,ParameterValue=$ROUTER_IMAGE"

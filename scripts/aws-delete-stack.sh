@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Delete CloudFormation stack. ECR repos and images are left as-is.
-# Requires: AWS CLI, env loaded (source scripts/aws-config.env).
+# Loads: .env.production (repo root), then scripts/aws-config.env.
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+[ -f "$REPO_ROOT/.env.production" ] && set -a && source "$REPO_ROOT/.env.production" && set +a
 source "$SCRIPT_DIR/aws-config.env" 2>/dev/null || true
 STACK_NAME="${STACK_NAME:-whatsmiau}"
 AWS_REGION="${AWS_REGION:-us-east-1}"

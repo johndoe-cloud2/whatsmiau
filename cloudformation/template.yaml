@@ -2,10 +2,10 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: Whatsmiau - Single API with Router, Redis, ECS backends (min 1, scale on CPU/RAM >80%)
 
 Parameters:
-  ApiSecret:
+  ApiKey:
     Type: String
     NoEcho: true
-    Description: API secret for router (header value)
+    Description: API key for auth (header apikey); used by router and backend
   WebhookURL:
     Type: String
     Description: Webhook URL for backend events (each backend sends events here)
@@ -242,10 +242,8 @@ Resources:
               Value: !Sub
                 - "${Address}:6379"
                 - Address: !GetAtt Redis.PrimaryEndpoint.Address
-            - Name: API_SECRET
-              Value: !Ref ApiSecret
-            - Name: API_SECRET_HEADER
-              Value: X-Api-Secret
+            - Name: API_KEY
+              Value: !Ref ApiKey
   RouterLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -287,6 +285,8 @@ Resources:
               Value: sqlite3
             - Name: DB_URL
               Value: file:/app/data/data.db?_foreign_keys=on
+            - Name: API_KEY
+              Value: !Ref ApiKey
   BackendLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
