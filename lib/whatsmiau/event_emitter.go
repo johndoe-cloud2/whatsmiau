@@ -13,7 +13,9 @@ import (
 
 	"github.com/emersion/go-vcard"
 	"github.com/google/uuid"
+	"github.com/verbeux-ai/whatsmiau/env"
 	"github.com/verbeux-ai/whatsmiau/models"
+	"github.com/verbeux-ai/whatsmiau/repositories/instances"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
@@ -113,6 +115,17 @@ func (s *Whatsmiau) emit(body any, url string) {
 	s.emitter <- emitter{url, body}
 }
 
+// getWebhookURL returns WEBHOOK_URL from env if set (ECS mode), else the instance's webhook URL.
+func getWebhookURL(instance *models.Instance) string {
+	if env.Env.WebhookURL != "" {
+		return env.Env.WebhookURL
+	}
+	if instance != nil && instance.Webhook.Url != "" {
+		return instance.Webhook.Url
+	}
+	return ""
+}
+
 func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 	return func(evt any) {
 		s.handlerSemaphore <- struct{}{}
@@ -156,15 +169,38 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 }
 
 func (s *Whatsmiau) handleLoggedOut(id string) {
+	ctx := context.Background()
+
 	client, ok := s.clients.Load(id)
 	if ok {
-		if err := s.deleteDeviceIfExists(context.Background(), client); err != nil {
+		if err := s.deleteDeviceIfExists(ctx, client); err != nil {
 			zap.L().Error("failed to delete device for instance", zap.String("instance", id), zap.Error(err))
 			return
 		}
 	}
 
 	s.clients.Delete(id)
+
+	// Remove instance metadata and route so router stops sending traffic here; notify webhook
+	if err := s.repo.Delete(ctx, id); err != nil {
+		zap.L().Warn("failed to delete instance from Redis", zap.String("instance", id), zap.Error(err))
+	}
+	if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
+		if err := redisRepo.DeleteRoute(ctx, id); err != nil {
+			zap.L().Warn("failed to delete route from Redis", zap.String("instance", id), zap.Error(err))
+		}
+	}
+	if webhookURL := getWebhookURL(nil); webhookURL != "" {
+		payload := &WookEvent[struct {
+			InstanceId string `json:"instanceId"`
+		}]{
+			Instance: id,
+			Data:     &struct{ InstanceId string `json:"instanceId"` }{InstanceId: id},
+			DateTime: time.Now(),
+			Event:    WookSessionLost,
+		}
+		s.emit(payload, webhookURL)
+	}
 }
 func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *events.Message, eventMap map[string]bool) {
 	if !eventMap["MESSAGES_UPSERT"] {
@@ -204,7 +240,7 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 		zap.L().Debug("message event", zap.String("instance", id), zap.Any("data", wookMessage.Data))
 	}
 
-	s.emit(wookMessage, instance.Webhook.Url)
+	s.emit(wookMessage, getWebhookURL(instance))
 }
 
 func (s *Whatsmiau) handleReceiptEvent(id string, instance *models.Instance, e *events.Receipt, eventMap map[string]bool) {
@@ -229,7 +265,7 @@ func (s *Whatsmiau) handleReceiptEvent(id string, instance *models.Instance, e *
 			Event:    WookMessagesUpdate,
 		}
 
-		s.emit(wookData, instance.Webhook.Url)
+		s.emit(wookData, getWebhookURL(instance))
 	}
 }
 
@@ -251,7 +287,7 @@ func (s *Whatsmiau) handleBusinessNameEvent(id string, instance *models.Instance
 		Event:    WookContactsUpsert,
 	}
 
-	s.emit(wookData, instance.Webhook.Url)
+	s.emit(wookData, getWebhookURL(instance))
 }
 
 func (s *Whatsmiau) handleContactEvent(id string, instance *models.Instance, e *events.Contact, eventMap map[string]bool) {
@@ -276,7 +312,7 @@ func (s *Whatsmiau) handleContactEvent(id string, instance *models.Instance, e *
 		Event:    WookContactsUpsert,
 	}
 
-	s.emit(wookData, instance.Webhook.Url)
+	s.emit(wookData, getWebhookURL(instance))
 }
 
 func (s *Whatsmiau) handlePictureEvent(id string, instance *models.Instance, e *events.Picture, eventMap map[string]bool) {
@@ -296,7 +332,7 @@ func (s *Whatsmiau) handlePictureEvent(id string, instance *models.Instance, e *
 		Event:    WookContactsUpsert,
 	}
 
-	s.emit(wookData, instance.Webhook.Url)
+	s.emit(wookData, getWebhookURL(instance))
 }
 
 func (s *Whatsmiau) handleHistorySyncEvent(id string, instance *models.Instance, e *events.HistorySync, eventMap map[string]bool) {
@@ -316,7 +352,7 @@ func (s *Whatsmiau) handleHistorySyncEvent(id string, instance *models.Instance,
 		Event:    WookContactsUpsert,
 	}
 
-	s.emit(wookData, instance.Webhook.Url)
+	s.emit(wookData, getWebhookURL(instance))
 }
 
 func (s *Whatsmiau) handleGroupInfoEvent(id string, instance *models.Instance, e *events.GroupInfo, eventMap map[string]bool) {
@@ -341,7 +377,7 @@ func (s *Whatsmiau) handleGroupInfoEvent(id string, instance *models.Instance, e
 		Event:    WookContactsUpsert,
 	}
 
-	s.emit(wookData, instance.Webhook.Url)
+	s.emit(wookData, getWebhookURL(instance))
 }
 
 func (s *Whatsmiau) handlePushNameEvent(id string, instance *models.Instance, e *events.PushName, eventMap map[string]bool) {
@@ -366,7 +402,7 @@ func (s *Whatsmiau) handlePushNameEvent(id string, instance *models.Instance, e 
 		Event:    WookContactsUpsert,
 	}
 
-	s.emit(wookData, instance.Webhook.Url)
+	s.emit(wookData, getWebhookURL(instance))
 }
 
 // parseWAMessage converts a raw waE2E.Message into our internal representation.

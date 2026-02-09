@@ -70,6 +70,14 @@ func (s *Instance) Create(ctx echo.Context) error {
 		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to create instance")
 	}
 
+	if env.Env.BackendPublicURL != "" {
+		if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
+			if err := redisRepo.SetRoute(c, request.Instance.ID, env.Env.BackendPublicURL); err != nil {
+				zap.L().Warn("failed to set route in Redis", zap.Error(err), zap.String("instance", request.Instance.ID))
+			}
+		}
+	}
+
 	return ctx.JSON(http.StatusCreated, dto.CreateInstanceResponse{
 		Instance: request.Instance,
 	})

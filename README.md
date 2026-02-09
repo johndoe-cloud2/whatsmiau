@@ -51,22 +51,40 @@ To get a local copy up and running follow these simple steps.
    go run main.go
    ```
 
-## Running with Docker
+## Running with Docker (Router + Backend + Redis)
 
-You can also run the application using Docker and Docker Compose.
+Run the full stack locally (igual que en producción: Router + Backend + Redis):
 
-1.  **Build and run the containers:**
-    ```sh
-    docker-compose up -d --build
-    ```
-2.  **View the logs:**
-    ```sh
-    docker-compose logs -f
-    ```
-3.  **Stop the containers:**
-    ```sh
-    docker-compose down
-    ```
+1. **Levantar y probar todo de una vez:**
+   ```sh
+   make test-stack
+   ```
+   (hace `docker-compose up -d --build`, espera a que respondan y ejecuta list/create/status contra el router.)
+
+2. **O a mano:** `docker-compose up -d --build`, luego:
+   ```sh
+   curl -H "X-Api-Secret: local-secret" http://localhost:8080/v1/instance
+   curl -X POST -H "X-Api-Secret: local-secret" -H "Content-Type: application/json" \
+     -d '{"instanceName":"my-instance"}' http://localhost:8080/v1/instance
+   ```
+
+- Router: `http://localhost:8080` (envs in `docker-compose.yml`: `API_SECRET=local-secret`, `REDIS_URL=redis:6379`).
+- Backend (direct): `http://localhost:8081` (optional; normally you use the router).
+- Redis: `localhost:6379` (for local `go run`).
+
+**View logs:** `docker-compose logs -f`  
+**Stop:** `docker-compose down`
+
+To run **without Docker** (backend only): install Redis, copy `env.local.example` to `.env`, then `go run main.go`. To run the router as well: `go run ./cmd/router/` in another terminal (use the same `.env` or set `REDIS_URL`, `API_SECRET`, `API_SECRET_HEADER`).
+
+## AWS deployment (single API with Router + ECS)
+
+To run a single public API that routes requests to the correct backend using Redis (min 1 backend, scale when CPU/RAM > 80%, SQLite per backend, webhook per env, session loss cleanup and notification):
+
+- See **[docs/deploy-aws.md](docs/deploy-aws.md)** for environment variables and step-by-step deploy.
+- **Scripts:** `scripts/aws-create-stack.sh`, `scripts/aws-update-stack.sh`, `scripts/aws-delete-stack.sh`, `scripts/aws-push-prod.sh`. Copy `scripts/aws-config.env.example` to `scripts/aws-config.env` and set `API_SECRET`, `WEBHOOK_URL`, and `ECR_REGISTRY` (or `AWS_ACCOUNT_ID`).
+- **Makefile:** `make infra-create` (first time), `make push-prod` (build + push images + roll out new code), `make infra-update`, `make infra-destroy`.
+- **Templates:** `cloudformation/template.yaml` (VPC, Redis, ECS router + backend, ALB, auto scaling).
 
 ## Docker Image
 
@@ -98,8 +116,10 @@ The application is configured using environment variables. The following variabl
 | `REDIS_PASSWORD` | The password for the Redis server. | `` |
 | `REDIS_TLS` | Enable or disable TLS for Redis. | `false` |
 | `API_KEY` | The API key to protect the service. | `` |
+| `WEBHOOK_URL` | (Optional) Single URL for all webhook events; overrides per-instance webhook when set. | `` |
+| `BACKEND_PUBLIC_URL` | (Optional) URL where this instance is reachable; used for Redis routing when deployed behind the router. | `` |
 | `DIALECT_DB` | The database dialect to use (`sqlite3` or `postgres`). | `sqlite3` |
-| `DB_URL` | The database connection URL. | `file:data.db?_foreign_keys=on` |
+| `DB_URL` | The database connection URL. For ECS use `file:/app/data/data.db?_foreign_keys=on`. | `file:data.db?_foreign_keys=on` |
 | `GCS_ENABLED` | Enable or disable Google Cloud Storage. | `false` |
 | `GCS_BUCKET` | The GCS bucket name. | `whatsmiau` |
 | `GCS_URL` | The GCS URL. | `https://storage.googleapis.com` |

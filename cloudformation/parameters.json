@@ -1,0 +1,18 @@
+[
+  {
+    "ParameterKey": "ApiSecret",
+    "ParameterValue": "CHANGE_ME"
+  },
+  {
+    "ParameterKey": "WebhookURL",
+    "ParameterValue": "https://your-webhook.example.com/events"
+  },
+  {
+    "ParameterKey": "BackendImage",
+    "ParameterValue": "123456789012.dkr.ecr.us-east-1.amazonaws.com/whatsmiau:latest"
+  },
+  {
+    "ParameterKey": "RouterImage",
+    "ParameterValue": "123456789012.dkr.ecr.us-east-1.amazonaws.com/whatsmiau-router:latest"
+  }
+]

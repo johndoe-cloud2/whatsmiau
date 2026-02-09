@@ -12,6 +12,7 @@ const (
 	WookMessagesUpsert Wook = "messages.upsert"
 	WookMessagesUpdate Wook = "messages.update"
 	WookContactsUpsert Wook = "contacts.upsert"
+	WookSessionLost    Wook = "session.lost"
 )
 
 type WookEvent[data any] struct {

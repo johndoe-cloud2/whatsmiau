@@ -168,3 +168,30 @@ func (s *RedisInstance) Delete(ctx context.Context, id string) error {
 
 	return s.db.Del(ctx, s.key(id)).Err()
 }
+
+const redisKeyBackends = "backends"
+const redisKeyRoutePrefix = "route:"
+
+// RegisterBackend adds this backend URL to the Redis set "backends" so the router can route new instances here.
+func (s *RedisInstance) RegisterBackend(ctx context.Context, url string) error {
+	if url == "" {
+		return nil
+	}
+	return s.db.SAdd(ctx, redisKeyBackends, url).Err()
+}
+
+// SetRoute sets route:<instanceID> = backendURL so the router can proxy requests for this instance to this backend.
+func (s *RedisInstance) SetRoute(ctx context.Context, instanceID, backendURL string) error {
+	if instanceID == "" || backendURL == "" {
+		return nil
+	}
+	return s.db.Set(ctx, redisKeyRoutePrefix+instanceID, backendURL, redis.KeepTTL).Err()
+}
+
+// DeleteRoute removes route:<instanceID> (e.g. when session is lost).
+func (s *RedisInstance) DeleteRoute(ctx context.Context, instanceID string) error {
+	if instanceID == "" {
+		return nil
+	}
+	return s.db.Del(ctx, redisKeyRoutePrefix+instanceID).Err()
+}

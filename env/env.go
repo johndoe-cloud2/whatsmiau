@@ -15,8 +15,14 @@ type E struct {
 	RedisTLS      bool   `env:"REDIS_TLS" envDefault:"false"`
 
 	ApiKey    string `env:"API_KEY" envDefault:""`
-	DBDialect string `env:"DIALECT_DB" envDefault:"sqlite3"`                   // sqlite3 or postgres
-	DBURL     string `env:"DB_URL" envDefault:"file:data.db?_foreign_keys=on"` // "postgres://<user>:<pass>@<host>:<port>/<DB>?sslmode=disable
+	// ECS/minimal: use sqlite3 and DB_URL=file:/app/data/data.db?_foreign_keys=on (Dockerfile has /app/data)
+	DBDialect string `env:"DIALECT_DB" envDefault:"sqlite3"`
+	DBURL     string `env:"DB_URL" envDefault:"file:data.db?_foreign_keys=on"`
+
+	// AWS/ECS: single webhook URL for all events from this backend; if set, overrides per-instance webhook
+	WebhookURL string `env:"WEBHOOK_URL" envDefault:""`
+	// URL at which this backend is reachable (for router routing); used to register in Redis backends + route:<id>
+	BackendPublicURL string `env:"BACKEND_PUBLIC_URL" envDefault:""`
 
 	GCSEnabled bool   `env:"GCS_ENABLED" envDefault:"false"`
 	GCSBucket  string `env:"GCS_BUCKET" envDefault:"whatsmiau"`

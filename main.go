@@ -9,6 +9,7 @@ import (
 	"github.com/verbeux-ai/whatsmiau/env"
 	log_connect "github.com/verbeux-ai/whatsmiau/lib/log-connect"
 	"github.com/verbeux-ai/whatsmiau/lib/whatsmiau"
+	"github.com/verbeux-ai/whatsmiau/repositories/instances"
 	"github.com/verbeux-ai/whatsmiau/server/routes"
 	"github.com/verbeux-ai/whatsmiau/services"
 	"go.uber.org/zap"
@@ -28,6 +29,15 @@ func main() {
 	ctx, c := context.WithTimeout(context.Background(), 10*time.Second)
 	defer c()
 	whatsmiau.LoadMiau(ctx, services.SQLStore())
+
+	if env.Env.BackendPublicURL != "" {
+		redisRepo := instances.NewRedis(services.Redis())
+		if err := redisRepo.RegisterBackend(context.Background(), env.Env.BackendPublicURL); err != nil {
+			zap.L().Warn("failed to register backend in Redis", zap.Error(err))
+		} else {
+			zap.L().Info("registered backend in Redis", zap.String("url", env.Env.BackendPublicURL))
+		}
+	}
 
 	app := echo.New()
 	app.Pre(middleware.Recover())
