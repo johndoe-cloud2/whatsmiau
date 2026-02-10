@@ -75,11 +75,12 @@ aws ecr describe-repositories --repository-names "$ECR_REPO_BACKEND" --region "$
 aws ecr describe-repositories --repository-names "$ECR_REPO_ROUTER" --region "$AWS_REGION" 2>/dev/null || \
   aws ecr create-repository --repository-name "$ECR_REPO_ROUTER" --region "$AWS_REGION"
 
-echo "=== Build and push Docker images to ECR ==="
+# Fargate is linux/amd64; build for that so images work when built on arm64 (e.g. Mac M1/M2)
+echo "=== Build and push Docker images to ECR (linux/amd64) ==="
 echo "Building backend..."
-docker build -t "$BACKEND_IMAGE" -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
+docker build --platform linux/amd64 -t "$BACKEND_IMAGE" -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
 echo "Building router..."
-docker build -t "$ROUTER_IMAGE" -f "$REPO_ROOT/Dockerfile.router" "$REPO_ROOT"
+docker build --platform linux/amd64 -t "$ROUTER_IMAGE" -f "$REPO_ROOT/Dockerfile.router" "$REPO_ROOT"
 echo "Login to ECR..."
 aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 echo "Pushing images..."
