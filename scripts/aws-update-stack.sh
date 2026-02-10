@@ -33,18 +33,35 @@ fi
 API_KEY="${API_KEY:-placeholder}"
 WEBHOOK_URL="${WEBHOOK_URL:-https://example.com/webhook}"
 
-PARAMS=(
-  "ParameterKey=ApiKey,ParameterValue=$API_KEY"
-  "ParameterKey=WebhookURL,ParameterValue=$WEBHOOK_URL"
-  "ParameterKey=BackendImage,ParameterValue=$BACKEND_IMAGE"
-  "ParameterKey=RouterImage,ParameterValue=$ROUTER_IMAGE"
-)
+VPC_ID="${VPC_ID:-}"
+PUBLIC_SUBNET_IDS="${PUBLIC_SUBNET_IDS:-}"
+PRIVATE_SUBNET_IDS="${PRIVATE_SUBNET_IDS:-}"
+if [ -z "$VPC_ID" ] && [ -z "$PUBLIC_SUBNET_IDS" ]; then
+  MAP=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" --query 'Stacks[0].Parameters[*].[ParameterKey,ParameterValue]' --output text 2>/dev/null || true)
+  [ -z "$VPC_ID" ] && VPC_ID=$(echo "$MAP" | awk '$1=="VpcId"{print $2}')
+  [ -z "$PUBLIC_SUBNET_IDS" ] && PUBLIC_SUBNET_IDS=$(echo "$MAP" | awk '$1=="PublicSubnetIds"{print $2}')
+  [ -z "$PRIVATE_SUBNET_IDS" ] && PRIVATE_SUBNET_IDS=$(echo "$MAP" | awk '$1=="PrivateSubnetIds"{print $2}')
+fi
+
+CF_PARAMS_FILE=$(mktemp)
+trap "rm -f $CF_PARAMS_FILE" EXIT
+cat <<EOF > "$CF_PARAMS_FILE"
+[
+  {"ParameterKey":"ApiKey","ParameterValue":"$(echo "$API_KEY" | sed 's/"/\\"/g')"},
+  {"ParameterKey":"WebhookURL","ParameterValue":"$(echo "$WEBHOOK_URL" | sed 's/"/\\"/g')"},
+  {"ParameterKey":"BackendImage","ParameterValue":"$BACKEND_IMAGE"},
+  {"ParameterKey":"RouterImage","ParameterValue":"$ROUTER_IMAGE"},
+  {"ParameterKey":"VpcId","ParameterValue":"${VPC_ID:-}"},
+  {"ParameterKey":"PublicSubnetIds","ParameterValue":"${PUBLIC_SUBNET_IDS:-}"},
+  {"ParameterKey":"PrivateSubnetIds","ParameterValue":"${PRIVATE_SUBNET_IDS:-}"}
+]
+EOF
 
 echo "Updating stack: $STACK_NAME"
 aws cloudformation update-stack \
   --stack-name "$STACK_NAME" \
   --template-body "file://$CF_DIR/template.yaml" \
-  --parameters "${PARAMS[@]}" \
+  --parameters "file://$CF_PARAMS_FILE" \
   --capabilities CAPABILITY_IAM \
   --region "$AWS_REGION" || true
 

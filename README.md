@@ -59,7 +59,7 @@ Run the full stack locally (same as production: Router + Backend + Redis):
    ```sh
    make test-stack
    ```
-   (runs `docker-compose up -d --build`, waits for services, then runs list/create/status against the router.)
+   (runs `docker-compose up -d --build`, waits for services, then verifies the API by listing instances; no new instances are created.)
 
 2. **Or manually:** `docker-compose up -d --build`, then:
    ```sh

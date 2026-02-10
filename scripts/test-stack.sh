@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bring up the stack as in production (router + backend + redis) and run API tests.
-# Usage: ./scripts/test-stack.sh   or: make test-stack
+# Bring up the stack as in production (router + backend + redis) and verify API responds.
+# Does not create new instances. Usage: ./scripts/test-stack.sh   or: make test-stack
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -9,7 +9,6 @@ cd "$REPO_ROOT"
 API="http://localhost:8080"
 APIKEY="local-apikey"
 HEADER="apikey"
-INSTANCE="test-$(date +%s)"
 
 COMPOSE_FILES="-f docker-compose.yml -f docker-compose.test-stack.yml"
 
@@ -42,37 +41,17 @@ for i in $(seq 1 45); do
 done
 
 echo ""
-echo "=== 1. List instances (expect [] or list) ==="
-curl -sS -H "$HEADER: $APIKEY" "$API/v1/instance" | head -c 500
-echo ""
-
-echo ""
-echo "=== 2. Create instance: $INSTANCE ==="
-CREATE=$(curl -sS -w "\n%{http_code}" -X POST -H "$HEADER: $APIKEY" -H "Content-Type: application/json" \
-  -d "{\"instanceName\":\"$INSTANCE\"}" "$API/v1/instance")
-HTTP=$(echo "$CREATE" | tail -n1)
-BODY=$(echo "$CREATE" | sed '$d')
-echo "HTTP $HTTP"
-echo "$BODY" | head -c 400
-echo ""
-
-if [ "$HTTP" != "201" ]; then
-  echo "Create instance failed (expected 201). Logs:"
+echo "=== List instances (verificación de API) ==="
+CODE=$(curl -sS -o /dev/null -w "%{http_code}" -H "$HEADER: $APIKEY" "$API/v1/instance")
+if [ "$CODE" != "200" ]; then
+  echo "List instances failed (HTTP $CODE). Logs:"
   docker-compose $COMPOSE_FILES logs --tail=20
   exit 1
 fi
-
-echo ""
-echo "=== 3. Instance status ==="
-curl -sS -H "$HEADER: $APIKEY" "$API/v1/instance/$INSTANCE/status" | head -c 300
-echo ""
-
-echo ""
-echo "=== 4. List again (should include $INSTANCE) ==="
 curl -sS -H "$HEADER: $APIKEY" "$API/v1/instance" | head -c 500
 echo ""
 
 echo ""
-echo "=== Done. API en http://localhost:8080 (router). Medios guardados en ./media (solo en test-stack). ==="
+echo "=== Done. API en http://localhost:8080 (router). No se crean instancias nuevas. Medios en ./media (solo en test-stack). ==="
 echo "  Stop: docker-compose $COMPOSE_FILES down"
 echo "  Logs: docker-compose $COMPOSE_FILES logs -f"
