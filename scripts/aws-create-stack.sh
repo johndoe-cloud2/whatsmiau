@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Create or destroy CloudFormation stack and ECR repos.
-# Usage: $0 [create|destroy]   (default: create)
-# Loads: .env.production (repo root), then scripts/aws-config.env.
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -78,75 +75,9 @@ aws ecr describe-repositories --repository-names "$ECR_REPO_BACKEND" --region "$
 aws ecr describe-repositories --repository-names "$ECR_REPO_ROUTER" --region "$AWS_REGION" 2>/dev/null || \
   aws ecr create-repository --repository-name "$ECR_REPO_ROUTER" --region "$AWS_REGION"
 
-# Optional: use existing VPC (set in .env.production, or auto-detect if not set).
-# When auto-detecting we use subnets from a single AZ only (first AZ; if 1 subnet we use it twice).
-VPC_ID="${VPC_ID:-}"
-PUBLIC_SUBNET_IDS="${PUBLIC_SUBNET_IDS:-}"
-PRIVATE_SUBNET_IDS="${PRIVATE_SUBNET_IDS:-}"
-AUTO_VPC=""
+# Siempre creamos VPC nueva + subnets en el template (100% aislado). Destroy borra todo.
+echo "Creating new VPC and subnets (stack is fully isolated)"
 
-# Subnets from one AZ when possible (first AZ); need 2 distinct subnets for ALB (no duplicates).
-# If first AZ has 2+ subnets use those; if only 1, add first subnet from next AZ.
-subnets_one_az() {
-  local vpc_id=$1
-  local all
-  all=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc_id" --query 'Subnets[*].[SubnetId,AvailabilityZone]' --output text --region "$AWS_REGION" 2>/dev/null | sort -k2)
-  local first_az
-  first_az=$(echo "$all" | head -1 | awk '{print $2}')
-  local in_first_az
-  in_first_az=$(echo "$all" | awk -v az="$first_az" '$2==az{print $1}')
-  local n_first
-  n_first=$(echo "$in_first_az" | grep -c . 2>/dev/null || echo 0)
-  if [ "${n_first:-0}" -ge 2 ]; then
-    echo "$in_first_az" | head -2 | paste -sd, -
-  else
-    # Need 2 distinct subnets (ALB rejects duplicates); take first two from any AZ
-    echo "$all" | awk '{print $1}' | head -2 | paste -sd, -
-  fi
-}
-
-# If VPC_ID is set but subnets missing, get subnets from that VPC (one AZ only)
-if [ -n "$VPC_ID" ] && { [ -z "$PUBLIC_SUBNET_IDS" ] || [ -z "$PRIVATE_SUBNET_IDS" ]; }; then
-  SUBNETS=$(subnets_one_az "$VPC_ID")
-  if [ -n "$SUBNETS" ]; then
-    [ -z "$PUBLIC_SUBNET_IDS" ] && PUBLIC_SUBNET_IDS="$SUBNETS"
-    [ -z "$PRIVATE_SUBNET_IDS" ] && PRIVATE_SUBNET_IDS="$SUBNETS"
-  fi
-fi
-
-# If still missing VPC or subnets, auto-detect: prefer default VPC, else first VPC with 1+ subnet(s)
-if [ -z "$VPC_ID" ] || [ -z "$PUBLIC_SUBNET_IDS" ] || [ -z "$PRIVATE_SUBNET_IDS" ]; then
-  DETECTED_VPC=""
-  DEFAULT_VPC=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text --region "$AWS_REGION" 2>/dev/null || true)
-  if [ -n "$DEFAULT_VPC" ] && [ "$DEFAULT_VPC" != "None" ]; then
-    COUNT=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$DEFAULT_VPC" --query 'length(Subnets)' --output text --region "$AWS_REGION" 2>/dev/null || echo "0")
-    [ "${COUNT:-0}" -ge 1 ] && DETECTED_VPC="$DEFAULT_VPC"
-  fi
-  if [ -z "$DETECTED_VPC" ]; then
-    for vpc in $(aws ec2 describe-vpcs --query 'Vpcs[*].VpcId' --output text --region "$AWS_REGION" 2>/dev/null || true); do
-      [ -z "$vpc" ] && continue
-      COUNT=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" --query 'length(Subnets)' --output text --region "$AWS_REGION" 2>/dev/null || echo "0")
-      if [ "${COUNT:-0}" -ge 1 ]; then DETECTED_VPC="$vpc"; break; fi
-    done
-  fi
-  if [ -n "$DETECTED_VPC" ]; then
-    SUBNETS=$(subnets_one_az "$DETECTED_VPC")
-    if [ -n "$SUBNETS" ]; then
-      [ -z "$VPC_ID" ] && VPC_ID="$DETECTED_VPC"
-      [ -z "$PUBLIC_SUBNET_IDS" ] && PUBLIC_SUBNET_IDS="$SUBNETS"
-      [ -z "$PRIVATE_SUBNET_IDS" ] && PRIVATE_SUBNET_IDS="$SUBNETS"
-      AUTO_VPC=1
-      echo "Using existing VPC (auto, single AZ): $VPC_ID (subnets: $PUBLIC_SUBNET_IDS)"
-    fi
-  fi
-fi
-
-if [ -n "$VPC_ID" ]; then
-  [ -n "$PUBLIC_SUBNET_IDS" ] && [ -n "$PRIVATE_SUBNET_IDS" ] || { echo "Error: When VPC_ID is set, PUBLIC_SUBNET_IDS and PRIVATE_SUBNET_IDS are required (comma-separated subnet IDs)."; exit 1; }
-  [ -z "$AUTO_VPC" ] && echo "Using existing VPC: $VPC_ID"
-fi
-
-# Use JSON file for parameters so comma in subnet IDs is preserved (CLI splits on comma otherwise)
 CF_PARAMS_FILE=$(mktemp)
 trap "rm -f $CF_PARAMS_FILE" EXIT
 cat <<EOF > "$CF_PARAMS_FILE"
@@ -154,10 +85,7 @@ cat <<EOF > "$CF_PARAMS_FILE"
   {"ParameterKey":"ApiKey","ParameterValue":"$(echo "$API_KEY" | sed 's/"/\\"/g')"},
   {"ParameterKey":"WebhookURL","ParameterValue":"$(echo "$WEBHOOK_URL" | sed 's/"/\\"/g')"},
   {"ParameterKey":"BackendImage","ParameterValue":"$BACKEND_IMAGE"},
-  {"ParameterKey":"RouterImage","ParameterValue":"$ROUTER_IMAGE"},
-  {"ParameterKey":"VpcId","ParameterValue":"${VPC_ID:-}"},
-  {"ParameterKey":"PublicSubnetIds","ParameterValue":"${PUBLIC_SUBNET_IDS:-}"},
-  {"ParameterKey":"PrivateSubnetIds","ParameterValue":"${PRIVATE_SUBNET_IDS:-}"}
+  {"ParameterKey":"RouterImage","ParameterValue":"$ROUTER_IMAGE"}
 ]
 EOF
 

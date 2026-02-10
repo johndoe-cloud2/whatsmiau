@@ -19,26 +19,9 @@ Parameters:
     Type: String
     Default: cache.t3.micro
     Description: ElastiCache node type
-  VpcId:
-    Type: String
-    Default: ""
-    Description: "(Optional) Existing VPC ID. If set, PublicSubnetIds and PrivateSubnetIds are required; no new VPC is created."
-  PublicSubnetIds:
-    Type: String
-    Default: ""
-    Description: "Comma-separated public subnet IDs (min 2) for ALB and router. Required if VpcId is set."
-  PrivateSubnetIds:
-    Type: String
-    Default: ""
-    Description: "Comma-separated private subnet IDs (min 2) for backend and Redis. Required if VpcId is set."
-
-Conditions:
-  CreateVpc: !Equals [!Ref VpcId, ""]
-  UseExistingVpc: !Not [!Equals [!Ref VpcId, ""]]
 
 Resources:
   VPC:
-    Condition: CreateVpc
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.0.0.0/16
@@ -47,16 +30,13 @@ Resources:
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
-    Condition: CreateVpc
   AttachIGW:
-    Condition: CreateVpc
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
   PublicSubnet1:
-    Condition: CreateVpc
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
@@ -64,7 +44,6 @@ Resources:
       AvailabilityZone: !Select [0, !GetAZs ""]
       MapPublicIpOnLaunch: true
   PublicSubnet2:
-    Condition: CreateVpc
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
@@ -73,14 +52,12 @@ Resources:
       MapPublicIpOnLaunch: true
 
   PrivateSubnet1:
-    Condition: CreateVpc
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.10.0/24
       AvailabilityZone: !Select [0, !GetAZs ""]
   PrivateSubnet2:
-    Condition: CreateVpc
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
@@ -88,25 +65,21 @@ Resources:
       AvailabilityZone: !Select [1, !GetAZs ""]
 
   NatEIP:
-    Condition: CreateVpc
     Type: AWS::EC2::EIP
     DependsOn: AttachIGW
     Properties:
       Domain: vpc
   NatGateway:
-    Condition: CreateVpc
     Type: AWS::EC2::NatGateway
     Properties:
       AllocationId: !GetAtt NatEIP.AllocationId
       SubnetId: !Ref PublicSubnet1
 
   PublicRouteTable:
-    Condition: CreateVpc
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
   PublicRoute:
-    Condition: CreateVpc
     Type: AWS::EC2::Route
     DependsOn: AttachIGW
     Properties:
@@ -114,38 +87,32 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
   PublicSubnet1RouteAssoc:
-    Condition: CreateVpc
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet1
       RouteTableId: !Ref PublicRouteTable
   PublicSubnet2RouteAssoc:
-    Condition: CreateVpc
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
   PrivateRouteTable:
-    Condition: CreateVpc
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
   PrivateRoute:
-    Condition: CreateVpc
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NatGateway
   PrivateSubnet1RouteAssoc:
-    Condition: CreateVpc
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet1
       RouteTableId: !Ref PrivateRouteTable
   PrivateSubnet2RouteAssoc:
-    Condition: CreateVpc
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet2
@@ -156,7 +123,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: ALB
-      VpcId: !If [CreateVpc, !Ref VPC, !Ref VpcId]
+      VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -166,7 +133,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Router
-      VpcId: !If [CreateVpc, !Ref VPC, !Ref VpcId]
+      VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 8080
@@ -176,7 +143,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Backend
-      VpcId: !If [CreateVpc, !Ref VPC, !Ref VpcId]
+      VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 8080
@@ -186,7 +153,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Redis
-      VpcId: !If [CreateVpc, !Ref VPC, !Ref VpcId]
+      VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 6379
@@ -196,69 +163,15 @@ Resources:
           FromPort: 6379
           ToPort: 6379
           SourceSecurityGroupId: !Ref BackendSG
-
-  # VPC endpoints for ECR (when using existing VPC without NAT, so tasks can pull images)
-  VPCEndpointSG:
-    Type: AWS::EC2::SecurityGroup
-    Condition: UseExistingVpc
-    Properties:
-      GroupDescription: VPC endpoints for ECR
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          SourceSecurityGroupId: !Ref BackendSG
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          SourceSecurityGroupId: !Ref RouterSG
-
-  VPCEndpointECRAPI:
-    Type: AWS::EC2::VPCEndpoint
-    Condition: UseExistingVpc
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds: !Split [",", !Ref PublicSubnetIds]
-      SecurityGroupIds:
-        - !Ref VPCEndpointSG
-
-  VPCEndpointECRDKR:
-    Type: AWS::EC2::VPCEndpoint
-    Condition: UseExistingVpc
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds: !Split [",", !Ref PublicSubnetIds]
-      SecurityGroupIds:
-        - !Ref VPCEndpointSG
-
-  VPCEndpointLogs:
-    Type: AWS::EC2::VPCEndpoint
-    Condition: UseExistingVpc
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds: !Split [",", !Ref PublicSubnetIds]
-      SecurityGroupIds:
-        - !Ref VPCEndpointSG
 
   # ElastiCache Redis
   RedisSubnetGroup:
     Type: AWS::ElastiCache::SubnetGroup
     Properties:
       Description: Redis subnet group
-      SubnetIds: !If
-        - CreateVpc
-        - [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
-        - !Split [",", !Ref PrivateSubnetIds]
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
   Redis:
     Type: AWS::ElastiCache::CacheCluster
     Properties:
@@ -384,10 +297,9 @@ Resources:
     Properties:
       Scheme: internet-facing
       Type: application
-      Subnets: !If
-        - CreateVpc
-        - [!Ref PublicSubnet1, !Ref PublicSubnet2]
-        - !Split [",", !Ref PublicSubnetIds]
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
       SecurityGroups:
         - !Ref ALBSG
 
@@ -396,7 +308,7 @@ Resources:
     Properties:
       Port: 8080
       Protocol: HTTP
-      VpcId: !If [CreateVpc, !Ref VPC, !Ref VpcId]
+      VpcId: !Ref VPC
       TargetType: ip
       HealthCheckEnabled: true
       HealthCheckPath: /
@@ -428,10 +340,9 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
-          Subnets: !If
-            - CreateVpc
-            - [!Ref PublicSubnet1, !Ref PublicSubnet2]
-            - !Split [",", !Ref PublicSubnetIds]
+          Subnets:
+            - !Ref PublicSubnet1
+            - !Ref PublicSubnet2
           SecurityGroups:
             - !Ref RouterSG
       LoadBalancers:
@@ -450,10 +361,9 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
-          Subnets: !If
-            - CreateVpc
-            - [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
-            - !Split [",", !Ref PublicSubnetIds]
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
           SecurityGroups:
             - !Ref BackendSG
 
