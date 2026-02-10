@@ -75,6 +75,18 @@ aws ecr describe-repositories --repository-names "$ECR_REPO_BACKEND" --region "$
 aws ecr describe-repositories --repository-names "$ECR_REPO_ROUTER" --region "$AWS_REGION" 2>/dev/null || \
   aws ecr create-repository --repository-name "$ECR_REPO_ROUTER" --region "$AWS_REGION"
 
+echo "=== Build and push Docker images to ECR ==="
+echo "Building backend..."
+docker build -t "$BACKEND_IMAGE" -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
+echo "Building router..."
+docker build -t "$ROUTER_IMAGE" -f "$REPO_ROOT/Dockerfile.router" "$REPO_ROOT"
+echo "Login to ECR..."
+aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+echo "Pushing images..."
+docker push "$BACKEND_IMAGE"
+docker push "$ROUTER_IMAGE"
+echo "=== Images pushed ==="
+
 # Siempre creamos VPC nueva + subnets en el template (100% aislado). Destroy borra todo.
 echo "Creating new VPC and subnets (stack is fully isolated)"
 
