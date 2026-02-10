@@ -22,11 +22,11 @@ BACKEND_IMAGE="${ECR_REGISTRY}/${ECR_REPO_BACKEND}:latest"
 ROUTER_IMAGE="${ECR_REGISTRY}/${ECR_REPO_ROUTER}:latest"
 CLUSTER_NAME="whatsmiau-${STACK_NAME}"
 
-# Fargate is linux/amd64 (required when building on arm64 e.g. Mac M1/M2)
+# Fargate is linux/amd64. --no-cache avoids reusing arm64 cached layers when on Mac M1/M2.
 echo "=== Build backend (linux/amd64) ==="
-docker build --platform linux/amd64 -t "$BACKEND_IMAGE" -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
+docker build --platform linux/amd64 --no-cache -t "$BACKEND_IMAGE" -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
 echo "=== Build router (linux/amd64) ==="
-docker build --platform linux/amd64 -t "$ROUTER_IMAGE" -f "$REPO_ROOT/Dockerfile.router" "$REPO_ROOT"
+docker build --platform linux/amd64 --no-cache -t "$ROUTER_IMAGE" -f "$REPO_ROOT/Dockerfile.router" "$REPO_ROOT"
 
 echo "=== Login to ECR ==="
 aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"

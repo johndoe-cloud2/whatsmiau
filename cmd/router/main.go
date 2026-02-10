@@ -83,6 +83,11 @@ type routerHandler struct {
 }
 
 func (h *routerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Allow unauthenticated health checks (ALB target group hits GET /)
+	if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/health") {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if key := strings.TrimSpace(h.apiKey); key != "" {
 		if r.Header.Get(apikeyHeader) != key {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
