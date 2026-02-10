@@ -197,11 +197,8 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
-  TaskExecutionRolePolicyAttach:
-    Type: AWS::IAM::RolePolicyAttachment
-    Properties:
-      RoleName: !Ref TaskExecutionRole
-      PolicyArn: arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -241,7 +238,7 @@ Resources:
             - Name: REDIS_URL
               Value: !Sub
                 - "${Address}:6379"
-                - Address: !GetAtt Redis.PrimaryEndpoint.Address
+                - Address: !GetAtt Redis.RedisEndpoint.Address
             - Name: API_KEY
               Value: !Ref ApiKey
   RouterLogGroup:
@@ -278,7 +275,7 @@ Resources:
             - Name: REDIS_URL
               Value: !Sub
                 - "${Address}:6379"
-                - Address: !GetAtt Redis.PrimaryEndpoint.Address
+                - Address: !GetAtt Redis.RedisEndpoint.Address
             - Name: WEBHOOK_URL
               Value: !Ref WebhookURL
             - Name: DIALECT_DB
@@ -413,6 +410,6 @@ Outputs:
     Description: Redis primary endpoint
     Value: !Sub
       - "${Address}:6379"
-      - Address: !GetAtt Redis.PrimaryEndpoint.Address
+      - Address: !GetAtt Redis.RedisEndpoint.Address
     Export:
       Name: !Sub ${AWS::StackName}-RedisEndpoint

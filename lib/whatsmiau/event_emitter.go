@@ -357,29 +357,11 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 }
 
 func (s *Whatsmiau) handleReceiptEvent(id string, instance *models.Instance, e *events.Receipt, eventMap map[string]bool) {
-	if !shouldEmitEvent(instance, "MESSAGES_UPDATE") {
-		return
-	}
-
-	if canIgnoreGroup(e, instance) {
-		return
-	}
-
-	data := s.convertEventReceipt(id, e)
-	if data == nil {
-		return
-	}
-
-	for _, event := range data {
-		wookData := &WookEvent[WookMessageUpdateData]{
-			Instance: instance.ID,
-			Data:     &event,
-			DateTime: e.Timestamp,
-			Event:    WookMessagesUpdate,
-		}
-
-		s.emit(wookData, getWebhookURL(instance))
-	}
+	// MESSAGES_UPDATE (delivery/read receipts) is not emitted to the webhook by design.
+	_ = id
+	_ = instance
+	_ = e
+	_ = eventMap
 }
 
 func (s *Whatsmiau) handleBusinessNameEvent(id string, instance *models.Instance, e *events.BusinessName, eventMap map[string]bool) {
