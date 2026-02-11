@@ -1,43 +1,65 @@
 #!/usr/bin/env bash
-# Build both images, push to ECR, and force ECS services to deploy the new code.
-# Loads: .env.production (repo root), then scripts/aws-config.env.
+# Build both images once, then push to ECR and force ECS deploy for each profile (ases, foxy).
+# Uses .env.ases for ases and .env.foxy for foxy.
 # Usage: ./scripts/aws-push-prod.sh   or: make push-prod
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-[ -f "$REPO_ROOT/.env.production" ] && set -a && source "$REPO_ROOT/.env.production" && set +a
 source "$SCRIPT_DIR/aws-config.env" 2>/dev/null || true
-[ -n "$AWS_PROFILE" ] && echo "Using AWS profile: $AWS_PROFILE"
-STACK_NAME="${STACK_NAME:-whatsmiau}"
-AWS_REGION="${AWS_REGION:-us-east-1}"
-ECR_REGISTRY="${ECR_REGISTRY:-}"
-ECR_REPO_BACKEND="${ECR_REPO_BACKEND:-whatsmiau}"
-ECR_REPO_ROUTER="${ECR_REPO_ROUTER:-whatsmiau-router}"
 
-if [ -z "$ECR_REGISTRY" ]; then
-  AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null)
-  ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-fi
-BACKEND_IMAGE="${ECR_REGISTRY}/${ECR_REPO_BACKEND}:latest"
-ROUTER_IMAGE="${ECR_REGISTRY}/${ECR_REPO_ROUTER}:latest"
-CLUSTER_NAME="whatsmiau-${STACK_NAME}"
+PROFILES="${AWS_PUSH_PROFILES:-ases foxy}"
+LOCAL_BACKEND="whatsmiau-backend:build"
+LOCAL_ROUTER="whatsmiau-router:build"
 
-# Fargate is linux/amd64. --no-cache avoids reusing arm64 cached layers when on Mac M1/M2.
+# Comprobar que existan los env de cada perfil
+for p in $PROFILES; do
+  if [ ! -f "$REPO_ROOT/.env.$p" ]; then
+    echo "Error: .env.$p no encontrado. Copia .env.$p.example a .env.$p y rellena valores." >&2
+    exit 1
+  fi
+done
+
+# Build una sola vez (linux/amd64 para Fargate)
 echo "=== Build backend (linux/amd64) ==="
-docker build --platform linux/amd64 --no-cache -t "$BACKEND_IMAGE" -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
+docker build --platform linux/amd64 --no-cache -t "$LOCAL_BACKEND" -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
 echo "=== Build router (linux/amd64) ==="
-docker build --platform linux/amd64 --no-cache -t "$ROUTER_IMAGE" -f "$REPO_ROOT/Dockerfile.router" "$REPO_ROOT"
+docker build --platform linux/amd64 --no-cache -t "$LOCAL_ROUTER" -f "$REPO_ROOT/Dockerfile.router" "$REPO_ROOT"
 
-echo "=== Login to ECR ==="
-aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+for AWS_PROFILE in $PROFILES; do
+  export AWS_PROFILE
+  echo ""
+  echo "========== Desplegando en perfil: $AWS_PROFILE =========="
+  set -a
+  source "$REPO_ROOT/.env.$AWS_PROFILE"
+  set +a
+  STACK_NAME="${STACK_NAME:-whatsmiau}"
+  AWS_REGION="${AWS_REGION:-us-east-1}"
+  ECR_REPO_BACKEND="${ECR_REPO_BACKEND:-whatsmiau}"
+  ECR_REPO_ROUTER="${ECR_REPO_ROUTER:-whatsmiau-router}"
+  if [ -z "$ECR_REGISTRY" ]; then
+    ECR_REGISTRY=$(aws sts get-caller-identity --query Account --output text 2>/dev/null)
+    ECR_REGISTRY="${ECR_REGISTRY}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+  fi
+  BACKEND_IMAGE="${ECR_REGISTRY}/${ECR_REPO_BACKEND}:latest"
+  ROUTER_IMAGE="${ECR_REGISTRY}/${ECR_REPO_ROUTER}:latest"
+  CLUSTER_NAME="whatsmiau-${STACK_NAME}"
 
-echo "=== Push images ==="
-docker push "$BACKEND_IMAGE"
-docker push "$ROUTER_IMAGE"
+  echo "=== Tag images for $AWS_PROFILE ==="
+  docker tag "$LOCAL_BACKEND" "$BACKEND_IMAGE"
+  docker tag "$LOCAL_ROUTER" "$ROUTER_IMAGE"
 
-echo "=== Force ECS deployment (new tasks pull latest) ==="
-aws ecs update-service --cluster "$CLUSTER_NAME" --service whatsmiau-backend  --force-new-deployment --region "$AWS_REGION" --query 'service.serviceName' --output text
-aws ecs update-service --cluster "$CLUSTER_NAME" --service whatsmiau-router   --force-new-deployment --region "$AWS_REGION" --query 'service.serviceName' --output text
+  echo "=== Login to ECR ($AWS_PROFILE) ==="
+  aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-echo "=== Push prod done. New tasks are rolling out. ==="
-echo "Check: aws ecs describe-services --cluster $CLUSTER_NAME --services whatsmiau-backend whatsmiau-router --region $AWS_REGION"
+  echo "=== Push images ==="
+  docker push "$BACKEND_IMAGE"
+  docker push "$ROUTER_IMAGE"
+
+  echo "=== Force ECS deployment ==="
+  aws ecs update-service --cluster "$CLUSTER_NAME" --service whatsmiau-backend  --force-new-deployment --region "$AWS_REGION" --query 'service.serviceName' --output text
+  aws ecs update-service --cluster "$CLUSTER_NAME" --service whatsmiau-router   --force-new-deployment --region "$AWS_REGION" --query 'service.serviceName' --output text
+done
+
+echo ""
+echo "=== Push prod done. Desplegado en: $PROFILES ==="
+echo "Para comprobar: aws ecs describe-services --cluster whatsmiau-\$STACK_NAME --services whatsmiau-backend whatsmiau-router --region \$AWS_REGION (con cada perfil)"

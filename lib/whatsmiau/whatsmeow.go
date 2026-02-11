@@ -391,15 +391,10 @@ func (s *Whatsmiau) Logout(ctx context.Context, id string) error {
 	return s.deleteDeviceIfExists(ctx, client)
 }
 
+// Disconnect tears down the instance completely: device store, Redis, route and webhook.
+// The number is removed as if it had never existed.
 func (s *Whatsmiau) Disconnect(id string) error {
-	client, ok := s.clients.Load(id)
-	if !ok {
-		zap.L().Warn("failed to disconnect (device not loaded)", zap.String("id", id))
-		return nil
-	}
-
-	client.Disconnect()
-	s.qrCache.Delete(id)
+	s.TeardownInstance(id)
 	return nil
 }
 

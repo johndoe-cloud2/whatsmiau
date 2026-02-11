@@ -291,7 +291,7 @@ func (s *Instance) Logout(ctx echo.Context) error {
 		return utils.HTTPFail(ctx, http.StatusNotFound, err, "instance not found")
 	}
 
-	if err := s.whatsmiau.Logout(c, request.ID); err != nil {
+	if err := s.whatsmiau.Disconnect(request.ID); err != nil {
 		zap.L().Error("failed to logout instance", zap.Error(err))
 		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to logout instance")
 	}
@@ -320,12 +320,7 @@ func (s *Instance) Delete(ctx echo.Context) error {
 		})
 	}
 
-	if err := s.whatsmiau.Logout(ctx.Request().Context(), request.ID); err != nil {
-		zap.L().Error("failed to disconnect instance", zap.Error(err))
-		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to logout instance")
-	}
-
-	if err := s.repo.Delete(c, request.ID); err != nil {
+	if err := s.whatsmiau.Disconnect(request.ID); err != nil {
 		zap.L().Error("failed to delete instance", zap.Error(err))
 		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to delete instance")
 	}

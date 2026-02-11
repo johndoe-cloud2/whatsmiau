@@ -1,6 +1,6 @@
 # Deploying Whatsmiau on AWS (single API with Router + ECS)
 
-This describes the minimal AWS setup: one public API (Router) that validates the API key (header `apikey`) and routes requests to the correct ECS backend using Redis. Each backend runs the Whatsmiau API with SQLite and a single webhook URL; backends scale when CPU or memory exceeds 80%.
+This describes the minimal AWS setup: one public API (Router) that validates the API key (header `apikey`) and routes requests to the correct ECS backend using Redis. Hay dos perfiles: **ases** y **foxy**, cada uno con su propia infra y su archivo de entorno (`.env.ases`, `.env.foxy`).
 
 ## Architecture
 
@@ -8,7 +8,24 @@ This describes the minimal AWS setup: one public API (Router) that validates the
 - **Redis**: Stores `route:<instance_id>` → backend URL and set `backends` (each backend registers on startup).
 - **Backends**: Whatsmiau API; SQLite in `/app/data`; `WEBHOOK_URL` for all events; on session loss, instance and route are removed and `session.lost` is sent to the webhook.
 
-## Environment variables
+## Perfiles: ases y foxy
+
+Cada perfil tiene su propia cuenta/rol AWS y su stack CloudFormation (mismo template). Se usan archivos de entorno separados:
+
+| Perfil | Archivo env | Uso |
+|--------|-------------|-----|
+| ases   | `.env.ases` | Infra y deploy del entorno ases |
+| foxy   | `.env.foxy` | Infra y deploy del entorno foxy |
+
+Copia los ejemplos y rellena `API_KEY`, `WEBHOOK_URL`, y opcionalmente `ECR_REGISTRY` o `AWS_ACCOUNT_ID`:
+
+```sh
+cp .env.ases.example .env.ases
+cp .env.foxy.example .env.foxy
+# Edita .env.ases y .env.foxy (API_KEY, WEBHOOK_URL, AWS_PROFILE=ases/foxy, etc.)
+```
+
+## Environment variables (por archivo .env.ases / .env.foxy)
 
 ### Router (ECS task)
 
@@ -16,8 +33,6 @@ This describes the minimal AWS setup: one public API (Router) that validates the
 |----------|-------------|
 | `PORT` | Listen port (default 8080) |
 | `REDIS_URL` | Redis host:port (e.g. from CloudFormation output) |
-| `REDIS_PASSWORD` | Optional |
-| `REDIS_TLS` | Set to true if Redis uses TLS |
 | `API_KEY` | Value clients must send in the `apikey` header |
 
 ### Backend (ECS task)
@@ -26,75 +41,71 @@ This describes the minimal AWS setup: one public API (Router) that validates the
 |----------|-------------|
 | `PORT` | Listen port (default 8080) |
 | `REDIS_URL` | Same Redis as router |
-| `API_KEY` | Same key as router (validates `apikey` header) |
+| `API_KEY` | Same key as router |
 | `WEBHOOK_URL` | URL where all WhatsApp events are sent |
-| `BACKEND_PUBLIC_URL` | Set automatically by entrypoint on ECS from task metadata (or set manually) |
 | `DIALECT_DB` | `sqlite3` |
 | `DB_URL` | `file:/app/data/data.db?_foreign_keys=on` |
 
 ## Deploy steps (scripts + Makefile)
 
-Prerequisites: AWS CLI configured, Docker. Copy the production env and set your values:
+### 1. Create infrastructure (first time) por perfil
+
+Crea ECR y el stack CloudFormation (VPC, Redis, ECS, ALB) para el perfil indicado:
 
 ```sh
-cp .env.production.example .env.production
-# Edit .env.production: API_KEY, WEBHOOK_URL, and either ECR_REGISTRY or AWS_ACCOUNT_ID (and optionally AWS_REGION, STACK_NAME, AWS_PROFILE)
-```
-
-**AWS profiles:** To use a profile from `~/.aws/credentials` (e.g. `ases`):
-
-```sh
+# Infra para ases (usa .env.ases)
 make infra-create PROFILE=ases
-make push-prod PROFILE=ases
-make infra-destroy PROFILE=ases
-# Or set default in .env.production: AWS_PROFILE=ases
+
+# Infra para foxy (usa .env.foxy)
+make infra-create PROFILE=foxy
 ```
 
-### 1. Create infrastructure (first time)
+### 2. Build, push y deploy en ambos perfiles (cada vez que cambies código)
 
-Creates ECR repos and the CloudFormation stack (VPC, Redis, ECS, ALB):
-
-```sh
-make infra-create
-# or: ./scripts/aws-create-stack.sh
-```
-
-### 2. Build, push images and deploy new code (every time you change code)
-
-Builds both images, pushes to ECR, and forces ECS to roll out the new tasks:
+Construye las imágenes una vez, luego hace push y fuerza el deploy ECS en **ases** y **foxy** (usando `.env.ases` y `.env.foxy`):
 
 ```sh
 make push-prod
-# or: ./scripts/aws-push-prod.sh
+# o: ./scripts/aws-push-prod.sh
 ```
 
-### 3. Update infrastructure (template or parameters)
+Requiere que existan `.env.ases` y `.env.foxy`. Para desplegar solo en un perfil puedes usar `AWS_PUSH_PROFILES=ases ./scripts/aws-push-prod.sh` (o solo `foxy`).
 
-After changing `cloudformation/template.yaml` or when you want to change parameters:
+### 3. Update infrastructure (template o parámetros)
+
+Tras cambiar `cloudformation/template.yaml` o parámetros, actualiza el stack del perfil que toque:
 
 ```sh
-make infra-update
-# or: ./scripts/aws-update-stack.sh
+make infra-update PROFILE=ases
+make infra-update PROFILE=foxy
 ```
 
 ### 4. Delete stack
 
 ```sh
-make infra-destroy
-# or: ./scripts/aws-delete-stack.sh
+make infra-destroy PROFILE=ases
+make infra-destroy PROFILE=foxy
 ```
 
-### 5. Get the API endpoint
+### 5. API endpoint y dominio (IONOS)
+
+Obtener la URL del API y el nombre del ALB (para configurar CNAME en IONOS, p. ej. `whatsmiau.asesadmin.com`):
 
 ```sh
-STACK_NAME=whatsmiau  # or your stack name
-aws cloudformation describe-stacks --stack-name $STACK_NAME --query 'Stacks[0].Outputs[?OutputKey==`APIEndpoint`].OutputValue' --output text
+# Valores para ases (dominio whatsmiau.asesadmin.com)
+make domain-info PROFILE=ases
+
+# Valores para foxy
+make domain-info PROFILE=foxy
 ```
 
-Call the API with the API key in the header:
+Ver [docs/dominio-ionos.md](../docs/dominio-ionos.md) para configurar el CNAME en IONOS.
+
+Llamar a la API (por ALB o por dominio cuando esté configurado):
 
 ```sh
 curl -H "apikey: YOUR_API_KEY" http://<APIEndpoint>/v1/instance
+# o con dominio: curl -H "apikey: YOUR_API_KEY" http://whatsmiau.asesadmin.com/v1/instance
 ```
 
 ## Flow

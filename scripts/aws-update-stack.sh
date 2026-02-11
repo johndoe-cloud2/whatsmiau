@@ -6,8 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CF_DIR="$REPO_ROOT/cloudformation"
 
-[ -f "$REPO_ROOT/.env.production" ] && set -a && source "$REPO_ROOT/.env.production" && set +a
 source "$SCRIPT_DIR/aws-config.env" 2>/dev/null || true
+AWS_PROFILE="${AWS_PROFILE:-ases}"
+export AWS_PROFILE
+ENV_FILE="$REPO_ROOT/.env.$AWS_PROFILE"
+[ ! -f "$ENV_FILE" ] && ENV_FILE="$REPO_ROOT/.env.production"
+[ -f "$ENV_FILE" ] && set -a && source "$ENV_FILE" && set +a
 STACK_NAME="${STACK_NAME:-whatsmiau}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 [ -n "$AWS_PROFILE" ] && echo "Using AWS profile: $AWS_PROFILE"

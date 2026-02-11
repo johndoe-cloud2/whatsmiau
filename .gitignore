@@ -1,6 +1,8 @@
 .idea
 .env
 .env.production
+.env.ases
+.env.foxy
 *.json
 !cloudformation/*.json
 *.db

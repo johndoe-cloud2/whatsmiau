@@ -252,6 +252,8 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 				}
 			case *events.LoggedOut:
 				s.handleLoggedOut(id)
+			case *events.Disconnected:
+				s.TeardownInstance(id)
 			case *events.Message:
 				s.handleMessageEvent(id, instance, e, eventMap)
 			case *events.Receipt:
@@ -276,6 +278,12 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 }
 
 func (s *Whatsmiau) handleLoggedOut(id string) {
+	s.TeardownInstance(id)
+}
+
+// TeardownInstance removes the instance completely: device store, client, Redis metadata, route and notifies webhook.
+// Use when a session is disconnected so that nothing remains for that number.
+func (s *Whatsmiau) TeardownInstance(id string) {
 	ctx := context.Background()
 
 	// Get instance and webhook URL before deleting (so we can notify with instance's webhook if set)
@@ -291,6 +299,7 @@ func (s *Whatsmiau) handleLoggedOut(id string) {
 	}
 
 	s.clients.Delete(id)
+	s.qrCache.Delete(id)
 
 	// Remove instance metadata and route so router stops sending traffic here; notify webhook
 	if err := s.repo.Delete(ctx, id); err != nil {

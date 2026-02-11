@@ -408,6 +408,11 @@ Outputs:
     Value: !Sub http://${ALB.DNSName}
     Export:
       Name: !Sub ${AWS::StackName}-APIEndpoint
+  ALBDNSName:
+    Description: ALB DNS name - use as CNAME target in IONOS (e.g. whatsmiau.asesadmin.com -> this value)
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-ALBDNSName
   RedisEndpoint:
     Description: Redis primary endpoint
     Value: !Sub

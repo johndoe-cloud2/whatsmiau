@@ -15,18 +15,21 @@ case "$ACTION" in
     ;;
 esac
 
-[ -f "$REPO_ROOT/.env.production" ] && set -a && source "$REPO_ROOT/.env.production" && set +a
+# Cargar env según perfil: .env.ases / .env.foxy si existen, si no .env.production
 source "$SCRIPT_DIR/aws-config.env" 2>/dev/null || true
 AWS_PROFILE="${AWS_PROFILE:-ases}"
 export AWS_PROFILE
+ENV_FILE="$REPO_ROOT/.env.$AWS_PROFILE"
+[ ! -f "$ENV_FILE" ] && ENV_FILE="$REPO_ROOT/.env.production"
+[ -f "$ENV_FILE" ] && set -a && source "$ENV_FILE" && set +a
 STACK_NAME="${STACK_NAME:-whatsmiau}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ECR_REPO_BACKEND="${ECR_REPO_BACKEND:-whatsmiau}"
 ECR_REPO_ROUTER="${ECR_REPO_ROUTER:-whatsmiau-router}"
 echo "Using AWS profile: $AWS_PROFILE"
 
-if [ "$ACTION" = "create" ] && [ ! -f "$REPO_ROOT/.env.production" ]; then
-  echo "Error: .env.production not found. Copy .env.production.example to .env.production and set API_KEY, WEBHOOK_URL (and optionally ECR_REGISTRY/AWS_ACCOUNT_ID)."
+if [ "$ACTION" = "create" ] && [ ! -f "$ENV_FILE" ]; then
+  echo "Error: $ENV_FILE not found. Copy .env.$AWS_PROFILE.example to .env.$AWS_PROFILE and set API_KEY, WEBHOOK_URL (and optionally ECR_REGISTRY/AWS_ACCOUNT_ID)."
   exit 1
 fi
 
