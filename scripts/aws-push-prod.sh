@@ -20,9 +20,9 @@ for p in $PROFILES; do
 done
 
 # Build once (linux/amd64 for Fargate)
-echo "=== Build backend (linux/amd64) ==="
+echo '=== Build backend linux/amd64 ==='
 docker build --platform linux/amd64 --no-cache -t "$LOCAL_BACKEND" -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
-echo "=== Build router (linux/amd64) ==="
+echo '=== Build router linux/amd64 ==='
 docker build --platform linux/amd64 --no-cache -t "$LOCAL_ROUTER" -f "$REPO_ROOT/Dockerfile.router" "$REPO_ROOT"
 
 for AWS_PROFILE in $PROFILES; do
@@ -50,7 +50,7 @@ for AWS_PROFILE in $PROFILES; do
   docker tag "$LOCAL_BACKEND" "$BACKEND_IMAGE"
   docker tag "$LOCAL_ROUTER" "$ROUTER_IMAGE"
 
-  echo "=== Login to ECR ($AWS_PROFILE) ==="
+  echo "=== Login to ECR: $AWS_PROFILE ==="
   aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
   echo "=== Push images ==="
@@ -64,4 +64,4 @@ done
 
 echo ""
 echo "=== Push prod done. Deployed to: $PROFILES ==="
-echo "To verify: aws ecs describe-services --cluster whatsmiau-\$STACK_NAME --services whatsmiau-backend whatsmiau-router --region \$AWS_REGION (with each profile)"
+echo "To verify: aws ecs describe-services --cluster whatsmiau-\$STACK_NAME --services whatsmiau-backend whatsmiau-router --region \$AWS_REGION with each profile"
