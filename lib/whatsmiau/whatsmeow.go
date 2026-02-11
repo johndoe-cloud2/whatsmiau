@@ -140,6 +140,7 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 	}
 
 	go instance.startEmitter()
+	go instance.runStaleInstancesCleanup()
 
 	clients.Range(func(id string, client *whatsmeow.Client) bool {
 		zap.L().Info("stating event handler", zap.String("jid", client.Store.ID.String()))
@@ -396,6 +397,35 @@ func (s *Whatsmiau) Logout(ctx context.Context, id string) error {
 func (s *Whatsmiau) Disconnect(id string) error {
 	s.TeardownInstance(id)
 	return nil
+}
+
+// runStaleInstancesCleanup runs periodically and removes instances that have not sent any webhook event in STALE_INSTANCE_DAYS.
+func (s *Whatsmiau) runStaleInstancesCleanup() {
+	if env.Env.StaleInstanceDays <= 0 {
+		return
+	}
+	olderThan := time.Duration(env.Env.StaleInstanceDays) * 24 * time.Hour
+	// First run after 5 minutes so startup is not blocked
+	time.Sleep(5 * time.Minute)
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		redisRepo, ok := s.repo.(*instances.RedisInstance)
+		if !ok {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		stale, err := redisRepo.ListStaleInstances(ctx, olderThan)
+		cancel()
+		if err != nil {
+			zap.L().Warn("stale instances cleanup: list failed", zap.Error(err))
+			continue
+		}
+		for _, id := range stale {
+			zap.L().Info("stale instances cleanup: removing instance with no webhook activity", zap.String("instance", id))
+			s.TeardownInstance(id)
+		}
+	}
 }
 
 func (s *Whatsmiau) GetJidLid(ctx context.Context, id string, jid types.JID) (string, string) {

@@ -39,6 +39,9 @@ type E struct {
 	EmitterBufferSize    int `env:"EMITTER_BUFFER_SIZE" envDefault:"2048"`
 	HandlerSemaphoreSize int `env:"HANDLER_SEMAPHORE_SIZE" envDefault:"512"`
 
+	// StaleInstanceDays: instances with no webhook event in this many days are removed by the periodic cleanup (0 = disabled).
+	StaleInstanceDays int `env:"STALE_INSTANCE_DAYS" envDefault:"30"`
+
 	ProxyAddresses []string `env:"PROXY_ADDRESSES" envDefault:""`      // random choices proxies ex: <SOCKS5|HTTP|HTTPS>://<username>:<password>@<host>:<port>
 	ProxyStrategy  string   `env:"PROXY_STRATEGY" envDefault:"RANDOM"` // todo: implement BALANCED
 	ProxyNoMedia   bool     `env:"PROXY_NO_MEDIA" envDefault:"false"`

@@ -308,6 +308,7 @@ Resources:
     Properties:
       Scheme: internet-facing
       Type: application
+      IdleTimeoutSeconds: 180
       Subnets:
         - !Ref PublicSubnet1
         - !Ref PublicSubnet2

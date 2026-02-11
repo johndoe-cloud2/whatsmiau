@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -13,7 +17,6 @@ import (
 	"github.com/verbeux-ai/whatsmiau/server/routes"
 	"github.com/verbeux-ai/whatsmiau/services"
 	"go.uber.org/zap"
-	"golang.org/x/net/context"
 	"golang.org/x/net/http2"
 )
 
@@ -37,6 +40,21 @@ func main() {
 		} else {
 			zap.L().Info("registered backend in Redis", zap.String("url", env.Env.BackendPublicURL))
 		}
+		// On SIGTERM/SIGINT (e.g. ECS stop), unregister so the router does not keep proxying to this task.
+		go func() {
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			<-sig
+			zap.L().Info("shutdown signal received, unregistering backend from Redis")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := redisRepo.UnregisterBackend(ctx, env.Env.BackendPublicURL); err != nil {
+				zap.L().Warn("failed to unregister backend from Redis", zap.Error(err))
+			} else {
+				zap.L().Info("unregistered backend from Redis", zap.String("url", env.Env.BackendPublicURL))
+			}
+			os.Exit(0)
+		}()
 	}
 
 	app := echo.New()

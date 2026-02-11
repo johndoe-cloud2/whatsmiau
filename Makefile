@@ -2,7 +2,7 @@
 # AWS: perfil ases usa .env.ases, perfil foxy usa .env.foxy (copiar de .env.ases.example / .env.foxy.example).
 # push-prod despliega en ambos perfiles (ases y foxy) usando sus .env.
 
-.PHONY: help run run-router local up down test-stack infra-create infra-update infra-destroy push-prod domain-info
+.PHONY: help run run-router local up down test-stack infra-create infra-update infra-destroy push-prod domain-info logs-fetch api-test
 
 # PROFILE=ases|foxy para infra (create/update/destroy); push-prod usa .env.ases y .env.foxy
 AWS_PROFILE ?= $(PROFILE)
@@ -21,6 +21,8 @@ help:
 	@echo "  make infra-destroy [PROFILE=ases]  - delete stack"
 	@echo "  make push-prod    - build once, push y ECS deploy en ases y foxy (.env.ases + .env.foxy)"
 	@echo "  make domain-info  - muestra ALB DNS para CNAME en IONOS (usa PROFILE=ases o foxy)"
+	@echo "  make logs-fetch HOURS=N - trae logs CloudWatch de ases y foxy últimas N horas"
+	@echo "  make api-test [PROFILE=ases] - prueba API desplegado (health, list, create) para ver 503/502/504"
 
 run:
 	go run main.go
@@ -53,3 +55,12 @@ push-prod:
 
 domain-info:
 	./scripts/aws-domain-info.sh
+
+# HOURS: cantidad de horas hacia atrás para traer logs (router + backend en ases y foxy)
+logs-fetch:
+	@[ -n "$(HOURS)" ] || (echo "Uso: make logs-fetch HOURS=2  (o 24, etc.)" && exit 1)
+	./scripts/aws-logs-fetch.sh "$(HOURS)"
+
+# Prueba el API desplegado (no local). Ver scripts/aws-api-test.sh. Tras ejecutar, make logs-fetch HOURS=1 para ver backends_count.
+api-test:
+	./scripts/aws-api-test.sh

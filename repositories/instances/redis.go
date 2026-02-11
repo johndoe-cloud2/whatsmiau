@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/verbeux-ai/whatsmiau/interfaces"
@@ -23,6 +25,10 @@ type RedisInstance struct {
 
 func (s *RedisInstance) key(id string) string {
 	return fmt.Sprintf("instance_%s", id)
+}
+
+func (s *RedisInstance) keyLastActivity(id string) string {
+	return fmt.Sprintf("instance_%s_last_activity", id)
 }
 
 func NewRedis(client *redis.Client) *RedisInstance {
@@ -166,7 +172,47 @@ func (s *RedisInstance) Delete(ctx context.Context, id string) error {
 		return ErrorNotFound
 	}
 
+	// Remove instance and its last-activity timestamp
+	_ = s.db.Del(ctx, s.keyLastActivity(id)).Err()
 	return s.db.Del(ctx, s.key(id)).Err()
+}
+
+// TouchLastWebhookActivity sets the last time this instance sent an event to the webhook (used for stale cleanup).
+func (s *RedisInstance) TouchLastWebhookActivity(ctx context.Context, instanceID string) error {
+	if instanceID == "" {
+		return nil
+	}
+	return s.db.Set(ctx, s.keyLastActivity(instanceID), time.Now().Unix(), redis.KeepTTL).Err()
+}
+
+// ListStaleInstances returns instance IDs that have not sent any webhook event since olderThan ago (or never).
+func (s *RedisInstance) ListStaleInstances(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	all, err := s.List(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().Add(-olderThan).Unix()
+	var stale []string
+	for _, inst := range all {
+		val, err := s.db.Get(ctx, s.keyLastActivity(inst.ID)).Result()
+		if err == redis.Nil {
+			// No activity ever recorded -> stale
+			stale = append(stale, inst.ID)
+			continue
+		}
+		if err != nil {
+			continue
+		}
+		ts, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			stale = append(stale, inst.ID)
+			continue
+		}
+		if ts < cutoff {
+			stale = append(stale, inst.ID)
+		}
+	}
+	return stale, nil
 }
 
 const redisKeyBackends = "backends"
@@ -178,6 +224,14 @@ func (s *RedisInstance) RegisterBackend(ctx context.Context, url string) error {
 		return nil
 	}
 	return s.db.SAdd(ctx, redisKeyBackends, url).Err()
+}
+
+// UnregisterBackend removes this backend URL from the Redis set "backends" (call on shutdown so the router stops proxying here).
+func (s *RedisInstance) UnregisterBackend(ctx context.Context, url string) error {
+	if url == "" {
+		return nil
+	}
+	return s.db.SRem(ctx, redisKeyBackends, url).Err()
 }
 
 // SetRoute sets route:<instanceID> = backendURL so the router can proxy requests for this instance to this backend.

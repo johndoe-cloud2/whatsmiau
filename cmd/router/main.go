@@ -2,9 +2,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"strings"
@@ -58,6 +61,10 @@ func main() {
 		Transport: &http.Transport{
 			MaxIdleConns:    100,
 			IdleConnTimeout: 90 * time.Second,
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			zap.L().Error("proxy to backend failed", zap.String("path", r.URL.Path), zap.String("host", r.Host), zap.Error(err))
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		},
 	}
 
@@ -120,17 +127,81 @@ func (h *routerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		urls, err := h.redis.SMembers(ctx, redisKeyBackends).Result()
-		if err != nil || len(urls) == 0 {
+		if err != nil {
 			zap.L().Warn("no backends available", zap.Error(err))
 			http.Error(w, "No backend available", http.StatusServiceUnavailable)
 			return
 		}
+		if len(urls) == 0 {
+			zap.L().Warn("no backends available", zap.Int("backends_count", 0))
+			http.Error(w, "No backend available", http.StatusServiceUnavailable)
+			return
+		}
+		zap.L().Info("proxying to backends", zap.String("path", path), zap.Int("backends_count", len(urls)))
 		backendURL = urls[0]
 	}
 
 	target, err := url.Parse(backendURL)
 	if err != nil {
 		zap.L().Error("invalid backend URL", zap.String("url", backendURL), zap.Error(err))
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+
+	// For requests without instance ID we may have multiple backends; try each until one responds (avoids 502 when one backend is down).
+	// Use a fresh context per attempt so client timeout/disconnect doesn't cancel all retries ("context canceled").
+	if instanceID == "" {
+		urls, _ := h.redis.SMembers(ctx, redisKeyBackends).Result()
+		var bodyBuf []byte
+		if r.Body != nil {
+			bodyBuf, _ = io.ReadAll(r.Body)
+			r.Body.Close()
+		}
+		// Per-backend timeout long enough for slow ops (e.g. create instance + QR); max tries so we stay under ALB idle.
+		const perBackendTimeout = 90 * time.Second
+		const maxBackendTries = 2
+		for i, u := range urls {
+			if i >= maxBackendTries {
+				break
+			}
+			t, err := url.Parse(u)
+			if err != nil {
+				continue
+			}
+			tryCtx, tryCancel := context.WithTimeout(context.Background(), perBackendTimeout)
+			defer tryCancel()
+			reqTry := r.Clone(tryCtx)
+			if len(bodyBuf) > 0 {
+				reqTry.Body = io.NopCloser(bytes.NewReader(bodyBuf))
+			}
+			rec := httptest.NewRecorder()
+			h.proxy.Director = func(req *http.Request) {
+				req.URL.Scheme = t.Scheme
+				req.URL.Host = t.Host
+				req.URL.Path = path
+				req.URL.RawPath = ""
+				req.Host = t.Host
+			}
+			h.proxy.ServeHTTP(rec, reqTry)
+			if rec.Code != http.StatusBadGateway && rec.Code != 0 {
+				zap.L().Info("backend responded", zap.String("backend", u), zap.Int("code", rec.Code))
+				for k, v := range rec.Header() {
+					for _, vv := range v {
+						w.Header().Add(k, vv)
+					}
+				}
+				w.WriteHeader(rec.Code)
+				_, _ = w.Write(rec.Body.Bytes())
+				return
+			}
+			// Backend unreachable (stale task IP); remove from Redis so we don't keep trying it.
+			if err := h.redis.SRem(ctx, redisKeyBackends, u).Err(); err != nil {
+				zap.L().Warn("failed to remove dead backend from Redis", zap.String("backend", u), zap.Error(err))
+			} else {
+				zap.L().Info("removed dead backend from Redis", zap.String("backend", u))
+			}
+			zap.L().Warn("backend failed, trying next", zap.String("backend", u), zap.Int("code", rec.Code))
+		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
