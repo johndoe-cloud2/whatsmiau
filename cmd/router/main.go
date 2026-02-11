@@ -83,9 +83,18 @@ type routerHandler struct {
 }
 
 func (h *routerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Allow unauthenticated health checks (ALB target group hits GET /)
-	if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/health") {
+	// Allow unauthenticated health checks (ALB and GET/HEAD /, /health)
+	norm := strings.TrimSuffix(strings.TrimSpace(r.URL.Path), "/")
+	if norm == "" {
+		norm = "/"
+	}
+	healthMethod := r.Method == http.MethodGet || r.Method == http.MethodHead
+	if healthMethod && (norm == "/" || norm == "/health") {
 		w.WriteHeader(http.StatusOK)
+		if norm == "/health" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("ok"))
+		}
 		return
 	}
 	if key := strings.TrimSpace(h.apiKey); key != "" {

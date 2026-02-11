@@ -15,13 +15,14 @@ case "$ACTION" in
     ;;
 esac
 
-# Cargar env según perfil: .env.ases / .env.foxy si existen, si no .env.production
+# Load env by profile: .env.ases / .env.foxy if they exist, otherwise .env.production
 source "$SCRIPT_DIR/aws-config.env" 2>/dev/null || true
 AWS_PROFILE="${AWS_PROFILE:-ases}"
 export AWS_PROFILE
 ENV_FILE="$REPO_ROOT/.env.$AWS_PROFILE"
 [ ! -f "$ENV_FILE" ] && ENV_FILE="$REPO_ROOT/.env.production"
 [ -f "$ENV_FILE" ] && set -a && source "$ENV_FILE" && set +a
+[ -f "$SCRIPT_DIR/aws-infra.$AWS_PROFILE.env" ] && set -a && source "$SCRIPT_DIR/aws-infra.$AWS_PROFILE.env" && set +a
 STACK_NAME="${STACK_NAME:-whatsmiau}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ECR_REPO_BACKEND="${ECR_REPO_BACKEND:-whatsmiau}"
@@ -91,17 +92,20 @@ docker push "$BACKEND_IMAGE"
 docker push "$ROUTER_IMAGE"
 echo "=== Images pushed ==="
 
-# Siempre creamos VPC nueva + subnets en el template (100% aislado). Destroy borra todo.
+# We always create a new VPC + subnets in the template (fully isolated). Destroy removes everything.
 echo "Creating new VPC and subnets (stack is fully isolated)"
 
 CF_PARAMS_FILE=$(mktemp)
 trap "rm -f $CF_PARAMS_FILE" EXIT
+CERT_ARN="${CERTIFICATE_ARN:-}"
+[ -z "$CERT_ARN" ] && CERT_ARN=""
 cat <<EOF > "$CF_PARAMS_FILE"
 [
   {"ParameterKey":"ApiKey","ParameterValue":"$(echo "$API_KEY" | sed 's/"/\\"/g')"},
   {"ParameterKey":"WebhookURL","ParameterValue":"$(echo "$WEBHOOK_URL" | sed 's/"/\\"/g')"},
   {"ParameterKey":"BackendImage","ParameterValue":"$BACKEND_IMAGE"},
-  {"ParameterKey":"RouterImage","ParameterValue":"$ROUTER_IMAGE"}
+  {"ParameterKey":"RouterImage","ParameterValue":"$ROUTER_IMAGE"},
+  {"ParameterKey":"CertificateArn","ParameterValue":"$(echo "$CERT_ARN" | sed 's/"/\\"/g')"}
 ]
 EOF
 

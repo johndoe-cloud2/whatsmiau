@@ -12,10 +12,10 @@ HEADER="apikey"
 
 COMPOSE_FILES="-f docker-compose.yml -f docker-compose.test-stack.yml"
 
-# En modo test, limpiar carpeta de medios de ejecuciones anteriores
+# In test mode, clean media folder from previous runs
 if [ -d "media" ]; then
   find media -mindepth 1 -delete 2>/dev/null || true
-  echo "=== Limpiada carpeta ./media ==="
+  echo "=== Cleaned ./media folder ==="
 fi
 
 # If router already responds, stack is up — skip build/up to avoid re-downloading
@@ -41,7 +41,7 @@ for i in $(seq 1 45); do
 done
 
 echo ""
-echo "=== List instances (verificación de API) ==="
+echo "=== List instances (API verification) ==="
 CODE=$(curl -sS -o /dev/null -w "%{http_code}" -H "$HEADER: $APIKEY" "$API/v1/instance")
 if [ "$CODE" != "200" ]; then
   echo "List instances failed (HTTP $CODE). Logs:"
@@ -52,6 +52,6 @@ curl -sS -H "$HEADER: $APIKEY" "$API/v1/instance" | head -c 500
 echo ""
 
 echo ""
-echo "=== Done. API en http://localhost:8080 (router). No se crean instancias nuevas. Medios en ./media (solo en test-stack). ==="
+echo "=== Done. API at http://localhost:8080 (router). No new instances are created. Media in ./media (test-stack only). ==="
 echo "  Stop: docker-compose $COMPOSE_FILES down"
 echo "  Logs: docker-compose $COMPOSE_FILES logs -f"

@@ -12,6 +12,7 @@ export AWS_PROFILE
 ENV_FILE="$REPO_ROOT/.env.$AWS_PROFILE"
 [ ! -f "$ENV_FILE" ] && ENV_FILE="$REPO_ROOT/.env.production"
 [ -f "$ENV_FILE" ] && set -a && source "$ENV_FILE" && set +a
+[ -f "$SCRIPT_DIR/aws-infra.$AWS_PROFILE.env" ] && set -a && source "$SCRIPT_DIR/aws-infra.$AWS_PROFILE.env" && set +a
 STACK_NAME="${STACK_NAME:-whatsmiau}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 [ -n "$AWS_PROFILE" ] && echo "Using AWS profile: $AWS_PROFILE"
@@ -36,6 +37,8 @@ if [ -z "$API_KEY" ] || [ -z "$WEBHOOK_URL" ]; then
 fi
 API_KEY="${API_KEY:-placeholder}"
 WEBHOOK_URL="${WEBHOOK_URL:-https://example.com/webhook}"
+CERTIFICATE_ARN="${CERTIFICATE_ARN:-}"
+[ -z "$CERTIFICATE_ARN" ] && CERTIFICATE_ARN=""
 
 CF_PARAMS_FILE=$(mktemp)
 trap "rm -f $CF_PARAMS_FILE" EXIT
@@ -44,7 +47,8 @@ cat <<EOF > "$CF_PARAMS_FILE"
   {"ParameterKey":"ApiKey","ParameterValue":"$(echo "$API_KEY" | sed 's/"/\\"/g')"},
   {"ParameterKey":"WebhookURL","ParameterValue":"$(echo "$WEBHOOK_URL" | sed 's/"/\\"/g')"},
   {"ParameterKey":"BackendImage","ParameterValue":"$BACKEND_IMAGE"},
-  {"ParameterKey":"RouterImage","ParameterValue":"$ROUTER_IMAGE"}
+  {"ParameterKey":"RouterImage","ParameterValue":"$ROUTER_IMAGE"},
+  {"ParameterKey":"CertificateArn","ParameterValue":"$(echo "$CERTIFICATE_ARN" | sed 's/"/\\"/g')"}
 ]
 EOF
 

@@ -11,15 +11,15 @@ PROFILES="${AWS_PUSH_PROFILES:-ases foxy}"
 LOCAL_BACKEND="whatsmiau-backend:build"
 LOCAL_ROUTER="whatsmiau-router:build"
 
-# Comprobar que existan los env de cada perfil
+# Check that env files exist for each profile
 for p in $PROFILES; do
   if [ ! -f "$REPO_ROOT/.env.$p" ]; then
-    echo "Error: .env.$p no encontrado. Copia .env.$p.example a .env.$p y rellena valores." >&2
+    echo "Error: .env.$p not found. Copy .env.$p.example to .env.$p and fill in values." >&2
     exit 1
   fi
 done
 
-# Build una sola vez (linux/amd64 para Fargate)
+# Build once (linux/amd64 for Fargate)
 echo "=== Build backend (linux/amd64) ==="
 docker build --platform linux/amd64 --no-cache -t "$LOCAL_BACKEND" -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
 echo "=== Build router (linux/amd64) ==="
@@ -28,7 +28,9 @@ docker build --platform linux/amd64 --no-cache -t "$LOCAL_ROUTER" -f "$REPO_ROOT
 for AWS_PROFILE in $PROFILES; do
   export AWS_PROFILE
   echo ""
-  echo "========== Desplegando en perfil: $AWS_PROFILE =========="
+  echo "========== Deploying for profile: $AWS_PROFILE =========="
+  # Reset ECR vars so each profile uses its own account (get-caller-identity uses current profile)
+  unset ECR_REGISTRY
   set -a
   source "$REPO_ROOT/.env.$AWS_PROFILE"
   set +a
@@ -61,5 +63,5 @@ for AWS_PROFILE in $PROFILES; do
 done
 
 echo ""
-echo "=== Push prod done. Desplegado en: $PROFILES ==="
-echo "Para comprobar: aws ecs describe-services --cluster whatsmiau-\$STACK_NAME --services whatsmiau-backend whatsmiau-router --region \$AWS_REGION (con cada perfil)"
+echo "=== Push prod done. Deployed to: $PROFILES ==="
+echo "To verify: aws ecs describe-services --cluster whatsmiau-\$STACK_NAME --services whatsmiau-backend whatsmiau-router --region \$AWS_REGION (with each profile)"

@@ -89,7 +89,9 @@ make infra-destroy PROFILE=foxy
 
 ### 5. API endpoint y dominio (IONOS)
 
-Obtener la URL del API y el nombre del ALB (para configurar CNAME en IONOS, p. ej. `whatsmiau.asesadmin.com`):
+El dominio está en IONOS (no en AWS). Para **ases** la API se expone en `whatsmiau.asesadmin.com`; para **foxy** usas el dominio que tengas en IONOS. En ambos casos configuras un CNAME en IONOS apuntando al ALB.
+
+Obtener el nombre del ALB (destino del CNAME):
 
 ```sh
 # Valores para ases (dominio whatsmiau.asesadmin.com)
