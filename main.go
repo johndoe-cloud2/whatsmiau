@@ -72,10 +72,6 @@ func main() {
 
 	routes.Load(app)
 
-	if env.Env.WebhookURL != "" {
-		whatsmiau.Get().EmitReady()
-	}
-
 	port := ":" + env.Env.Port
 	zap.L().Info("starting server...", zap.String("port", port))
 

@@ -156,50 +156,12 @@ func (s *Whatsmiau) markMessageEmitted(ctx context.Context, instanceID, key stri
 	}
 }
 
-// sessionEventPayload is the flat format for session.connected and session.lost (no "data" wrapper).
+// sessionEventPayload is the flat format for session.lost (no "data" wrapper).
 type sessionEventPayload struct {
 	Instance    string    `json:"instance"`
 	PhoneNumber string    `json:"phoneNumber"`
 	DateTime    time.Time `json:"date_time"`
 	Event       Wook      `json:"event"`
-}
-
-// emitSessionConnected sends session.connected to the webhook when the device connects (pairing success or reconnect).
-// Format: instance and phoneNumber at root, no data.
-func (s *Whatsmiau) emitConnectionUpdate(instanceID, remoteJID string) {
-	instance := s.getInstance(instanceID)
-	if instance == nil {
-		return
-	}
-	url := getWebhookURL(instance)
-	if url == "" {
-		return
-	}
-	payload := &sessionEventPayload{
-		Instance:    instanceID,
-		PhoneNumber: participantToPhoneNumber(remoteJID),
-		DateTime:    time.Now(),
-		Event:       WookSessionConnected,
-	}
-	s.emitForInstance(instanceID, payload, url)
-}
-
-// EmitReady sends a "session.connected" event to the webhook when the API has finished starting.
-// Only sent if WEBHOOK_URL (env) is set. Same format as session.connected with instance and phoneNumber empty.
-func (s *Whatsmiau) EmitReady() {
-	url := getWebhookURL(nil)
-	if url == "" {
-		zap.L().Info("WEBHOOK_URL not set, skipping ready event")
-		return
-	}
-	zap.L().Info("sending session.connected (API ready) to webhook", zap.String("url", url))
-	payload := &sessionEventPayload{
-		Instance:    "",
-		PhoneNumber: "",
-		DateTime:    time.Now(),
-		Event:       WookSessionConnected,
-	}
-	s.emit(payload, url)
 }
 
 // getWebhookURL returns WEBHOOK_URL from env if set (ECS mode), else the instance's webhook URL.
@@ -263,7 +225,7 @@ func messageContentFromRaw(raw *WookMessageRaw, messageType string) WookMessageC
 	return out
 }
 
-// participantToPhoneNumber returns the part of participant before "@" (e.g. "5493512275498@s.whatsapp.net" -> "5493512275498").
+// participantToPhoneNumber returns the part of participant before "@" (e.g. "5493515830572@s.whatsapp.net" -> "5493515830572").
 func participantToPhoneNumber(participant string) string {
 	if i := strings.Index(participant, "@"); i != -1 {
 		return participant[:i]
@@ -367,10 +329,6 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 			}
 
 			switch e := evt.(type) {
-			case *events.Connected:
-				if client, ok := s.clients.Load(id); ok && client.Store != nil && client.Store.ID != nil {
-					s.emitConnectionUpdate(id, client.Store.ID.String())
-				}
 			case *events.LoggedOut:
 				s.handleLoggedOut(id)
 			case *events.Disconnected:

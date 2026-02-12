@@ -13,7 +13,6 @@ const (
 	WookMessagesUpdate   Wook = "messages.update"
 	WookContactsUpsert   Wook = "contacts.upsert"
 	WookSessionLost      Wook = "session.lost"
-	WookSessionConnected Wook = "session.connected"
 	WookConnectionUpdate Wook = "connection.update"
 )
 
