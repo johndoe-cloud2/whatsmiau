@@ -75,6 +75,7 @@ func (s *Whatsmiau) NumberExists(ctx context.Context, data *NumberExistsRequest)
 	var results []Exists
 	for _, item := range resp {
 		jid, lid := s.GetJidLid(ctx, data.InstanceID, item.JID)
+		s.StoreChatKey(data.InstanceID, lid, jid, lid)
 
 		entry := Exists{
 			Exists: item.IsIn,

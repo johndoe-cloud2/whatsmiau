@@ -18,7 +18,6 @@ import (
 	"github.com/verbeux-ai/whatsmiau/repositories/instances"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"go.uber.org/zap"
@@ -127,54 +126,78 @@ func (s *Whatsmiau) emitForInstance(instanceID string, body any, url string) {
 	s.emit(body, url)
 }
 
-// emitConnectionUpdate sends a connection.update event to the webhook when the device connects (pairing success or reconnect).
-// Sent when WEBHOOK_URL is set or when the instance has webhook URL and CONNECTION_UPDATE in webhook.events.
+// messageKey builds a unique key for deduplication: chatJid|fromMe|messageId.
+func messageKey(chatJid string, fromMe bool, messageId string) string {
+	return fmt.Sprintf("%s|%v|%s", chatJid, fromMe, messageId)
+}
+
+// shouldEmitMessageEvent returns false if we already emitted this message (dedup). Otherwise marks as emitted after emitting.
+// Call this before emitting; if it returns true, caller must emit and then call markMessageEmitted.
+func (s *Whatsmiau) wasMessageEmitted(ctx context.Context, instanceID, key string) bool {
+	redisRepo, ok := s.repo.(*instances.RedisInstance)
+	if !ok {
+		return false
+	}
+	yes, err := redisRepo.WasMessageEmitted(ctx, instanceID, key)
+	if err != nil {
+		zap.L().Warn("failed to check emitted message", zap.String("instance", instanceID), zap.String("key", key), zap.Error(err))
+		return false
+	}
+	return yes
+}
+
+func (s *Whatsmiau) markMessageEmitted(ctx context.Context, instanceID, key string) {
+	redisRepo, ok := s.repo.(*instances.RedisInstance)
+	if !ok {
+		return
+	}
+	if err := redisRepo.MarkMessageEmitted(ctx, instanceID, key); err != nil {
+		zap.L().Warn("failed to mark message emitted", zap.String("instance", instanceID), zap.String("key", key), zap.Error(err))
+	}
+}
+
+// sessionEventPayload is the flat format for session.connected and session.lost (no "data" wrapper).
+type sessionEventPayload struct {
+	Instance    string    `json:"instance"`
+	PhoneNumber string    `json:"phoneNumber"`
+	DateTime    time.Time `json:"date_time"`
+	Event       Wook      `json:"event"`
+}
+
+// emitSessionConnected sends session.connected to the webhook when the device connects (pairing success or reconnect).
+// Format: instance and phoneNumber at root, no data.
 func (s *Whatsmiau) emitConnectionUpdate(instanceID, remoteJID string) {
 	instance := s.getInstance(instanceID)
 	if instance == nil {
-		return
-	}
-	if !shouldEmitEvent(instance, "CONNECTION_UPDATE") {
 		return
 	}
 	url := getWebhookURL(instance)
 	if url == "" {
 		return
 	}
-	payload := &WookEvent[struct {
-		InstanceId string `json:"instanceId"`
-		RemoteJID  string `json:"remoteJid"`
-		State      string `json:"state"`
-	}]{
-		Instance: instanceID,
-		Data: &struct {
-			InstanceId string `json:"instanceId"`
-			RemoteJID  string `json:"remoteJid"`
-			State      string `json:"state"`
-		}{InstanceId: instanceID, RemoteJID: remoteJID, State: "open"},
-		DateTime: time.Now(),
-		Event:    WookConnectionUpdate,
+	payload := &sessionEventPayload{
+		Instance:    instanceID,
+		PhoneNumber: participantToPhoneNumber(remoteJID),
+		DateTime:    time.Now(),
+		Event:       WookSessionConnected,
 	}
 	s.emitForInstance(instanceID, payload, url)
 }
 
-// EmitReady sends a "ready" event to the webhook when the API has finished starting.
-// Only sent if WEBHOOK_URL (env) is set.
+// EmitReady sends a "session.connected" event to the webhook when the API has finished starting.
+// Only sent if WEBHOOK_URL (env) is set. Same format as session.connected with instance and phoneNumber empty.
 func (s *Whatsmiau) EmitReady() {
 	url := getWebhookURL(nil)
 	if url == "" {
 		zap.L().Info("WEBHOOK_URL not set, skipping ready event")
 		return
 	}
-	zap.L().Info("sending ready event to webhook", zap.String("url", url))
-	payload := &WookEvent[struct {
-		State string `json:"state"`
-	}]{
-		Data: &struct {
-			State string `json:"state"`
-		}{State: "open"},
-		DateTime: time.Now(),
-		Event:    WookReady,
+	zap.L().Info("sending session.connected (API ready) to webhook", zap.String("url", url))
+	payload := &sessionEventPayload{
+		Instance:    "",
+		PhoneNumber: "",
+		DateTime:    time.Now(),
+		Event:       WookSessionConnected,
 	}
 	s.emit(payload, url)
 }
@@ -206,10 +229,87 @@ func shouldEmitEvent(instance *models.Instance, eventName string) bool {
 	return false
 }
 
+// messageContentFromRaw returns the webhook message object: message (text/caption) and fileBase64, each null when not present.
+func messageContentFromRaw(raw *WookMessageRaw, messageType string) WookMessageContent {
+	out := WookMessageContent{}
+	if raw == nil {
+		return out
+	}
+	switch messageType {
+	case "conversation":
+		if raw.Conversation != "" {
+			out.Message = &raw.Conversation
+		}
+	case "imageMessage", "audioMessage", "documentMessage", "videoMessage":
+		if raw.Base64 != "" {
+			out.FileBase64 = &raw.Base64
+		}
+		// caption for image/video/document
+		var caption string
+		switch {
+		case raw.ImageMessage != nil:
+			caption = raw.ImageMessage.Caption
+		case raw.VideoMessage != nil:
+			caption = raw.VideoMessage.Caption
+		case raw.DocumentMessage != nil:
+			caption = raw.DocumentMessage.Caption
+		}
+		if caption != "" {
+			out.Message = &caption
+		}
+	default:
+		// reaction, contact, list, etc.: both null
+	}
+	return out
+}
+
+// participantToPhoneNumber returns the part of participant before "@" (e.g. "5493512275498@s.whatsapp.net" -> "5493512275498").
+func participantToPhoneNumber(participant string) string {
+	if i := strings.Index(participant, "@"); i != -1 {
+		return participant[:i]
+	}
+	return participant
+}
+
+// fillKeyFromCacheOrStore resolves key missing fields: first from per-instance cache, then from the client's LID store.
+// When the key has only LID or empty RemoteJid we resolve via cache then store (GetPNForLID).
+// When the key has RemoteJid (PN) but no RemoteLid we resolve via store (GetLIDForPN).
+func (s *Whatsmiau) fillKeyFromCacheOrStore(ctx context.Context, instanceID string, key *WookKey) {
+	if key == nil {
+		return
+	}
+	// Case 1: we have LID (or RemoteJid is actually a LID) but need remoteJid
+	lid := key.RemoteLid
+	if lid == "" && key.RemoteJid != "" && strings.HasSuffix(key.RemoteJid, "@lid") {
+		lid = key.RemoteJid
+	}
+	if lid != "" {
+		jid, cachedLid, ok := s.ResolveChatKey(instanceID, lid)
+		if !ok {
+			jid, cachedLid, ok = s.ResolveChatKeyFromStore(ctx, instanceID, lid)
+		}
+		if ok {
+			key.RemoteJid = jid
+			key.RemoteLid = cachedLid
+		}
+		return
+	}
+	// Case 2: we have remoteJid (PN) but no lid — resolve LID from store
+	if key.RemoteJid != "" && key.RemoteLid == "" && !strings.HasSuffix(key.RemoteJid, "@lid") {
+		if lid, ok := s.ResolveLidFromStore(ctx, instanceID, key.RemoteJid); ok {
+			key.RemoteLid = lid
+		}
+	}
+}
+
 // EmitMessageSent sends a MESSAGES_UPSERT event to the webhook when a message is sent via the API.
 // Sent when WEBHOOK_URL is set or when the instance has webhook URL and MESSAGES_UPSERT in webhook.events.
 // When instance is nil, only emits if WEBHOOK_URL env is set (so message-sent events are never dropped when using global webhook).
+// Dedup: we only emit if this message id was not already emitted for this instance.
 func (s *Whatsmiau) EmitMessageSent(instance *models.Instance, instanceID, remoteJID, messageID string, timestamp time.Time, messageType string, raw *WookMessageRaw, participant string) {
+	if messageType == "unknown" {
+		return
+	}
 	url := getWebhookURL(instance)
 	if url == "" {
 		return
@@ -217,28 +317,37 @@ func (s *Whatsmiau) EmitMessageSent(instance *models.Instance, instanceID, remot
 	if instance != nil && !shouldEmitEvent(instance, "MESSAGES_UPSERT") {
 		return
 	}
-	key := &WookKey{
-		RemoteJid:   remoteJID,
-		FromMe:      true,
-		Id:          messageID,
-		Participant: participant,
+	// Dedup: skip if we already emitted this sent message.
+	msgKey := messageKey(remoteJID, true, messageID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if s.wasMessageEmitted(ctx, instanceID, msgKey) {
+		cancel()
+		zap.L().Debug("skipping duplicate message sent event", zap.String("instance", instanceID), zap.String("messageId", messageID))
+		return
 	}
-	payload := &WookEvent[WookMessageData]{
-		Instance: instanceID,
-		Data: &WookMessageData{
-			Key:              key,
-			Status:           "sent",
-			Message:          raw,
-			MessageType:      messageType,
-			MessageTimestamp: int(timestamp.Unix()),
-			InstanceId:       instanceID,
-			Source:           "api",
-		},
-		DateTime: timestamp,
-		Event:    WookMessagesUpsert,
+	cancel()
+
+	if raw != nil && raw.Base64 != "" {
+		raw.Filebase64 = &raw.Base64
+	}
+	phoneNumber := participantToPhoneNumber(remoteJID)
+	if phoneNumber == "" {
+		phoneNumber = participantToPhoneNumber(participant)
+	}
+	payload := &WookMessageUpsertPayload{
+		Instance:    instanceID,
+		PhoneNumber: phoneNumber,
+		FromMe:      true,
+		Message:     messageContentFromRaw(raw, messageType),
+		DateTime:    timestamp,
+		Event:       WookMessagesUpsert,
 	}
 	zap.L().Debug("emitting message sent to webhook", zap.String("instance", instanceID), zap.String("event", string(WookMessagesUpsert)))
 	s.emitForInstance(instanceID, payload, url)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	s.markMessageEmitted(ctx2, instanceID, msgKey)
+	cancel2()
 }
 
 func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
@@ -268,18 +377,12 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 				s.TeardownInstance(id)
 			case *events.Message:
 				s.handleMessageEvent(id, instance, e, eventMap)
-			case *events.Receipt:
-				s.handleReceiptEvent(id, instance, e, eventMap)
 			case *events.BusinessName:
 				s.handleBusinessNameEvent(id, instance, e, eventMap)
 			case *events.Contact:
 				s.handleContactEvent(id, instance, e, eventMap)
 			case *events.Picture:
 				s.handlePictureEvent(id, instance, e, eventMap)
-			case *events.HistorySync:
-				s.handleHistorySyncEvent(id, instance, e, eventMap)
-			case *events.GroupInfo:
-				s.handleGroupInfoEvent(id, instance, e, eventMap)
 			case *events.PushName:
 				s.handlePushNameEvent(id, instance, e, eventMap)
 			default:
@@ -312,6 +415,12 @@ func (s *Whatsmiau) TeardownInstance(id string) {
 
 	s.clients.Delete(id)
 	s.qrCache.Delete(id)
+	s.ClearChatKeyCache(id)
+
+	// Remove emitted-message dedup keys for this instance
+	if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
+		_ = redisRepo.DeleteEmittedMessagesForInstance(ctx, id)
+	}
 
 	// Remove instance metadata and route so router stops sending traffic here; notify webhook
 	if err := s.repo.Delete(ctx, id); err != nil {
@@ -323,15 +432,11 @@ func (s *Whatsmiau) TeardownInstance(id string) {
 		}
 	}
 	if webhookURL != "" {
-		payload := &WookEvent[struct {
-			InstanceId string `json:"instanceId"`
-		}]{
-			Instance: id,
-			Data: &struct {
-				InstanceId string `json:"instanceId"`
-			}{InstanceId: id},
-			DateTime: time.Now(),
-			Event:    WookSessionLost,
+		payload := &sessionEventPayload{
+			Instance:    id,
+			PhoneNumber: "",
+			DateTime:    time.Now(),
+			Event:       WookSessionLost,
 		}
 		s.emitForInstance(id, payload, webhookURL)
 	}
@@ -340,8 +445,8 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 	if !shouldEmitEvent(instance, "MESSAGES_UPSERT") {
 		return
 	}
-
-	if canIgnoreGroup(e, instance) {
+	// Never emit message events from groups or channels.
+	if isGroupOrChannelJID(e.Info.Chat.String()) {
 		return
 	}
 
@@ -349,176 +454,80 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 		return
 	}
 
+	// Dedup: only emit if we haven't already sent this message id to the webhook.
+	msgKey := messageKey(e.Info.Chat.String(), e.Info.IsFromMe, e.Info.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if s.wasMessageEmitted(ctx, instance.ID, msgKey) {
+		cancel()
+		zap.L().Debug("skipping duplicate message event", zap.String("instance", id), zap.String("messageId", e.Info.ID))
+		return
+	}
+	cancel()
+
 	messageData := s.convertEventMessage(id, instance, e)
 	if messageData == nil {
 		zap.L().Error("failed to convert event", zap.String("id", id), zap.String("type", fmt.Sprintf("%T", e)), zap.Any("raw", e))
 		return
 	}
-
-	messageData.InstanceId = instance.ID
-
-	dateTime := time.Unix(int64(messageData.MessageTimestamp), 0)
-	wookMessage := &WookEvent[WookMessageData]{
-		Instance: instance.ID,
-		Data:     messageData,
-		DateTime: dateTime,
-		Event:    WookMessagesUpsert,
+	if messageData.MessageType == "unknown" {
+		return
 	}
 
-	if wookMessage.Data.Message != nil && len(wookMessage.Data.Message.Base64) > 0 {
-		b64Temp := wookMessage.Data.Message.Base64
-		wookMessage.Data.Message.Base64 = ""
-		zap.L().Debug("message event", zap.String("instance", id), zap.Any("data", wookMessage.Data))
-		wookMessage.Data.Message.Base64 = b64Temp
-	} else if wookMessage.Data.Message != nil {
-		zap.L().Debug("message event", zap.String("instance", id), zap.Any("data", wookMessage.Data))
+	dateTime := e.Info.Timestamp
+	if dateTime.IsZero() {
+		dateTime = time.Now()
 	}
+	fromMe := e.Info.IsFromMe
+	payload := &WookMessageUpsertPayload{
+		Instance:    instance.ID,
+		PhoneNumber: messageData.Key.PhoneNumber,
+		FromMe:      fromMe,
+		Message:     messageContentFromRaw(messageData.Message, messageData.MessageType),
+		DateTime:    dateTime,
+		Event:       WookMessagesUpsert,
+	}
+	if payload.Message.FileBase64 != nil && len(*payload.Message.FileBase64) > 200 {
+		zap.L().Debug("message event", zap.String("instance", id), zap.String("phoneNumber", payload.PhoneNumber), zap.Int("fileBase64Len", len(*payload.Message.FileBase64)))
+	} else {
+		zap.L().Debug("message event", zap.String("instance", id), zap.Any("payload", payload))
+	}
+	s.emitForInstance(instance.ID, payload, getWebhookURL(instance))
 
-	s.emitForInstance(instance.ID, wookMessage, getWebhookURL(instance))
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	s.markMessageEmitted(ctx2, instance.ID, msgKey)
+	cancel2()
 }
 
-func (s *Whatsmiau) handleReceiptEvent(id string, instance *models.Instance, e *events.Receipt, eventMap map[string]bool) {
-	// MESSAGES_UPDATE (delivery/read receipts) is not emitted to the webhook by design.
+func (s *Whatsmiau) handleBusinessNameEvent(id string, instance *models.Instance, e *events.BusinessName, eventMap map[string]bool) {
+	// contacts.upsert is not emitted to the webhook by design.
 	_ = id
 	_ = instance
 	_ = e
 	_ = eventMap
 }
 
-func (s *Whatsmiau) handleBusinessNameEvent(id string, instance *models.Instance, e *events.BusinessName, eventMap map[string]bool) {
-	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
-		return
-	}
-
-	data := s.convertBusinessName(id, e)
-	if data == nil {
-		zap.L().Error("failed to convert business name", zap.String("id", id), zap.String("type", fmt.Sprintf("%T", e)), zap.Any("raw", e))
-		return
-	}
-
-	wookData := &WookEvent[WookContactUpsertData]{
-		Instance: instance.ID,
-		Data:     &WookContactUpsertData{*data},
-		DateTime: time.Now(),
-		Event:    WookContactsUpsert,
-	}
-
-	s.emitForInstance(instance.ID, wookData, getWebhookURL(instance))
-}
-
 func (s *Whatsmiau) handleContactEvent(id string, instance *models.Instance, e *events.Contact, eventMap map[string]bool) {
-	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
-		return
-	}
-
-	if canIgnoreGroup(e, instance) {
-		return
-	}
-
-	data := s.convertContact(id, e)
-	if data == nil {
-		zap.L().Error("failed to convert contact", zap.String("id", id), zap.String("type", fmt.Sprintf("%T", e)), zap.Any("raw", e))
-		return
-	}
-
-	wookData := &WookEvent[WookContactUpsertData]{
-		Instance: instance.ID,
-		Data:     &WookContactUpsertData{*data},
-		DateTime: time.Now(),
-		Event:    WookContactsUpsert,
-	}
-
-	s.emitForInstance(instance.ID, wookData, getWebhookURL(instance))
+	// contacts.upsert is not emitted to the webhook by design.
+	_ = id
+	_ = instance
+	_ = e
+	_ = eventMap
 }
 
 func (s *Whatsmiau) handlePictureEvent(id string, instance *models.Instance, e *events.Picture, eventMap map[string]bool) {
-	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
-		return
-	}
-
-	data := s.convertPicture(id, e)
-	if data == nil {
-		return
-	}
-
-	wookData := &WookEvent[WookContactUpsertData]{
-		Instance: instance.ID,
-		Data:     &WookContactUpsertData{*data},
-		DateTime: e.Timestamp,
-		Event:    WookContactsUpsert,
-	}
-
-	s.emitForInstance(instance.ID, wookData, getWebhookURL(instance))
-}
-
-func (s *Whatsmiau) handleHistorySyncEvent(id string, instance *models.Instance, e *events.HistorySync, eventMap map[string]bool) {
-	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
-		return
-	}
-
-	data := s.convertContactHistorySync(id, e.Data.GetPushnames(), e.Data.Conversations)
-	if data == nil {
-		return
-	}
-
-	wookData := &WookEvent[WookContactUpsertData]{
-		Instance: instance.ID,
-		Data:     &data,
-		DateTime: time.Now(),
-		Event:    WookContactsUpsert,
-	}
-
-	s.emitForInstance(instance.ID, wookData, getWebhookURL(instance))
-}
-
-func (s *Whatsmiau) handleGroupInfoEvent(id string, instance *models.Instance, e *events.GroupInfo, eventMap map[string]bool) {
-	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
-		return
-	}
-
-	if instance.GroupsIgnore {
-		return
-	}
-
-	data := s.convertGroupInfo(id, e)
-	if data == nil {
-		zap.L().Debug("failed to convert group info", zap.String("id", id), zap.String("type", fmt.Sprintf("%T", e)), zap.Any("raw", e))
-		return
-	}
-
-	wookData := &WookEvent[WookContactUpsertData]{
-		Instance: instance.ID,
-		Data:     &WookContactUpsertData{*data},
-		DateTime: time.Now(),
-		Event:    WookContactsUpsert,
-	}
-
-	s.emitForInstance(instance.ID, wookData, getWebhookURL(instance))
+	// contacts.upsert is not emitted to the webhook by design.
+	_ = id
+	_ = instance
+	_ = e
+	_ = eventMap
 }
 
 func (s *Whatsmiau) handlePushNameEvent(id string, instance *models.Instance, e *events.PushName, eventMap map[string]bool) {
-	if !shouldEmitEvent(instance, "CONTACTS_UPSERT") {
-		return
-	}
-
-	if canIgnoreGroup(e, instance) {
-		return
-	}
-
-	data := s.convertPushName(id, e)
-	if data == nil {
-		zap.L().Error("failed to convert pushname", zap.String("id", id), zap.String("type", fmt.Sprintf("%T", e)), zap.Any("raw", e))
-		return
-	}
-
-	wookData := &WookEvent[WookContactUpsertData]{
-		Instance: instance.ID,
-		Data:     &WookContactUpsertData{*data},
-		DateTime: time.Now(),
-		Event:    WookContactsUpsert,
-	}
-
-	s.emitForInstance(instance.ID, wookData, getWebhookURL(instance))
+	// contacts.upsert is not emitted to the webhook by design.
+	_ = id
+	_ = instance
+	_ = e
+	_ = eventMap
 }
 
 // parseWAMessage converts a raw waE2E.Message into our internal representation.
@@ -535,6 +544,9 @@ func (s *Whatsmiau) parseWAMessage(m *waE2E.Message) (string, *WookMessageRaw, *
 		reactionKey := &WookKey{}
 		if rk := r.GetKey(); rk != nil {
 			reactionKey.RemoteJid = rk.GetRemoteJID()
+			if reactionKey.RemoteJid != "" && strings.HasSuffix(reactionKey.RemoteJid, "@lid") {
+				reactionKey.RemoteLid = reactionKey.RemoteJid
+			}
 			reactionKey.FromMe = rk.GetFromMe()
 			reactionKey.Id = rk.GetID()
 			reactionKey.Participant = rk.GetParticipant()
@@ -673,83 +685,6 @@ func (s *Whatsmiau) parseWAMessage(m *waE2E.Message) (string, *WookMessageRaw, *
 	return messageType, raw, ci
 }
 
-func (s *Whatsmiau) convertContactHistorySync(id string, event []*waHistorySync.Pushname, conversations []*waHistorySync.Conversation) WookContactUpsertData {
-	resultMap := make(map[string]WookContact)
-	for _, pushName := range event {
-
-		if len(pushName.GetPushname()) == 0 {
-			continue
-		}
-
-		if dt := strings.Split(pushName.GetPushname(), "@"); len(dt) == 2 && (dt[1] == "g.us" || dt[1] == "s.whatsapp.net") {
-			return nil
-		}
-
-		jid, err := types.ParseJID(pushName.GetID())
-		if err != nil {
-			zap.L().Error("failed to parse jid", zap.String("pushname", pushName.GetPushname()))
-			return nil
-		}
-
-		jidParsed, lid := s.GetJidLid(context.Background(), id, jid)
-
-		resultMap[jidParsed] = WookContact{
-			RemoteJid:  jidParsed,
-			PushName:   pushName.GetPushname(),
-			InstanceId: id,
-			RemoteLid:  lid,
-		}
-	}
-
-	for _, conversation := range conversations {
-		name := conversation.GetName()
-		if len(name) == 0 {
-			name = conversation.GetDisplayName()
-		}
-		if len(name) == 0 {
-			name = conversation.GetUsername()
-		}
-		if len(name) == 0 {
-			continue
-		}
-		if dt := strings.Split(name, "@"); len(dt) == 2 && (dt[1] == "g.us" || dt[1] == "s.whatsapp.net") {
-			return nil
-		}
-
-		jid, err := types.ParseJID(conversation.GetID())
-		if err != nil {
-			zap.L().Error("failed to parse jid", zap.String("name", conversation.GetName()))
-			return nil
-		}
-		jidParsed, lid := s.GetJidLid(context.Background(), id, jid)
-
-		resultMap[conversation.GetID()] = WookContact{
-			RemoteJid:  jidParsed,
-			PushName:   name,
-			InstanceId: id,
-			RemoteLid:  lid,
-		}
-	}
-
-	var result []WookContact
-	for _, c := range resultMap {
-		jid, err := types.ParseJID(c.RemoteJid)
-		if err != nil {
-			continue
-		}
-
-		url, _, err := s.getPic(id, jid)
-		if err != nil {
-			zap.L().Error("failed to get pic", zap.Error(err))
-		}
-
-		c.ProfilePicUrl = url
-		result = append(result, c)
-	}
-
-	return result
-}
-
 func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, evt *events.Message) *WookMessageData {
 	ctx, c := context.WithTimeout(context.Background(), time.Second*60)
 	defer c()
@@ -766,6 +701,7 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 
 	jid, lid := s.GetJidLid(ctx, id, evt.Info.Chat)
 	senderJid, _ := s.GetJidLid(ctx, id, evt.Info.Sender)
+	s.StoreChatKey(id, lid, jid, lid)
 
 	// Always unwrap to work with the real content
 	e := evt.UnwrapRaw()
@@ -780,20 +716,8 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 		Participant: senderJid,
 	}
 
-	// Determine status
-	status := "received"
-	if e.Info.IsFromMe {
-		status = "sent"
-	}
-
-	// Timestamp
-	ts := e.Info.Timestamp
-	if ts.IsZero() {
-		ts = time.Now()
-	}
-
 	// Convert the WA protobuf message into our internal raw structure
-	messageType, raw, ci := s.parseWAMessage(m)
+	messageType, raw, _ := s.parseWAMessage(m)
 
 	// Upload media (URL / Base64) when needed; also set decoded fields inside the media object for convenience
 	switch messageType {
@@ -819,96 +743,22 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 		}
 	}
 
-	// Map MessageContextInfo (quoted, mentions, disappearing mode, external ad reply)
-	var messageContext WookMessageContextInfo
-	if ci != nil {
-		messageContext.EphemeralSettingTimestamp = i64(ci.GetEphemeralSettingTimestamp())
-		messageContext.StanzaId = ci.GetStanzaID()
-		messageContext.Participant = ci.GetParticipant()
-		messageContext.Expiration = int(ci.GetExpiration())
-		messageContext.MentionedJid = ci.GetMentionedJID()
-		messageContext.ConversionSource = ci.GetConversionSource()
-		messageContext.ConversionData = b64(ci.GetConversionData())
-		messageContext.ConversionDelaySeconds = int(ci.GetConversionDelaySeconds())
-		messageContext.EntryPointConversionSource = ci.GetEntryPointConversionSource()
-		messageContext.EntryPointConversionApp = ci.GetEntryPointConversionApp()
-		messageContext.EntryPointConversionDelaySeconds = int(ci.GetEntryPointConversionDelaySeconds())
-		messageContext.TrustBannerAction = ci.GetTrustBannerAction()
-
-		if dm := ci.GetDisappearingMode(); dm != nil {
-			messageContext.DisappearingMode = &ContextInfoDisappearingMode{
-				Initiator:     dm.GetInitiator().String(),
-				Trigger:       dm.GetTrigger().String(),
-				InitiatedByMe: dm.GetInitiatedByMe(),
-			}
-		}
-
-		if ear := ci.GetExternalAdReply(); ear != nil {
-			messageType = "conversation"
-			messageContext.ExternalAdReply = &WookMessageContextInfoExternalAdReply{
-				Title:                 ear.GetTitle(),
-				Body:                  ear.GetBody(),
-				MediaType:             ear.GetMediaType().String(),
-				ThumbnailUrl:          ear.GetThumbnailURL(),
-				Thumbnail:             b64(ear.GetThumbnail()),
-				SourceType:            ear.GetSourceType(),
-				SourceId:              ear.GetSourceID(),
-				SourceUrl:             ear.GetSourceURL(),
-				ContainsAutoReply:     ear.GetContainsAutoReply(),
-				RenderLargerThumbnail: ear.GetRenderLargerThumbnail(),
-				ShowAdAttribution:     ear.GetShowAdAttribution(),
-				CtwaClid:              ear.GetCtwaClid(),
-			}
-		}
-
-		if qm := ci.GetQuotedMessage(); qm != nil {
-			_, qmRaw, _ := s.parseWAMessage(qm)
-			messageContext.QuotedMessage = qmRaw
-		}
+	s.fillKeyFromCacheOrStore(ctx, id, key)
+	if raw != nil && raw.ReactionMessage != nil && raw.ReactionMessage.Key != nil {
+		s.fillKeyFromCacheOrStore(ctx, id, raw.ReactionMessage.Key)
+	}
+	if raw != nil && raw.Base64 != "" {
+		raw.Filebase64 = &raw.Base64
 	}
 
+	phoneNumber := participantToPhoneNumber(senderJid)
 	return &WookMessageData{
-		Key:              key,
-		PushName:         strings.TrimSpace(e.Info.PushName),
-		Status:           status,
-		Message:          raw,
-		ContextInfo:      &messageContext,
-		MessageType:      messageType,
-		MessageTimestamp: int(ts.Unix()),
-		InstanceId:       id,
-		Source:           "whatsapp",
+		Key:         &WookMessageKey{PhoneNumber: phoneNumber},
+		PushName:    strings.TrimSpace(e.Info.PushName),
+		Message:     raw,
+		MessageType: messageType,
+		InstanceId:  id,
 	}
-}
-
-func (s *Whatsmiau) convertEventReceipt(id string, evt *events.Receipt) []WookMessageUpdateData {
-	var status WookMessageUpdateStatus
-	switch evt.Type {
-	case types.ReceiptTypeRead:
-		status = MessageStatusRead
-	case types.ReceiptTypeDelivered:
-		status = MessageStatusDeliveryAck
-	default:
-		return nil
-	}
-
-	chatJid, chatLid := s.GetJidLid(context.Background(), id, evt.Chat)
-	participantJid, _ := s.GetJidLid(context.Background(), id, evt.Sender)
-
-	var result []WookMessageUpdateData
-	for _, messageID := range evt.MessageIDs {
-		result = append(result, WookMessageUpdateData{
-			MessageId:   messageID,
-			KeyId:       messageID,
-			RemoteJid:   chatJid,
-			RemoteLid:   chatLid,
-			FromMe:      evt.IsFromMe,
-			Participant: participantJid,
-			Status:      status,
-			InstanceId:  id,
-		})
-	}
-
-	return result
 }
 
 func (s *Whatsmiau) uploadMessageFile(ctx context.Context, instance *models.Instance, client *whatsmeow.Client, fileMessage whatsmeow.DownloadableMessage, mimetype, fileName string) (string, string) {
@@ -959,7 +809,7 @@ func (s *Whatsmiau) uploadMessageFile(ctx context.Context, instance *models.Inst
 }
 
 func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact {
-	url, _, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID, false) // don't fetch profile pic on events; only when requested via API
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
 	}
@@ -980,6 +830,7 @@ func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact 
 	}
 
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
+	s.StoreChatKey(id, lid, jid, lid)
 	return &WookContact{
 		RemoteJid:     jid,
 		RemoteLid:     lid,
@@ -989,33 +840,8 @@ func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact 
 	}
 }
 
-func (s *Whatsmiau) convertGroupInfo(id string, evt *events.GroupInfo) *WookContact {
-	url, _, err := s.getPic(id, evt.JID)
-	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
-	}
-
-	if evt.Name == nil || len(evt.Name.Name) == 0 {
-		return nil
-	}
-
-	if dt := strings.Split(evt.Name.Name, "@"); len(dt) == 2 && (dt[1] == "g.us" || dt[1] == "s.whatsapp.net") {
-		return nil
-	}
-
-	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
-
-	return &WookContact{
-		RemoteJid:     jid,
-		PushName:      evt.Name.Name,
-		ProfilePicUrl: url,
-		InstanceId:    id,
-		RemoteLid:     lid,
-	}
-}
-
 func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContact {
-	url, _, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID, false) // don't fetch profile pic on events; only when requested via API
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
 	}
@@ -1034,7 +860,7 @@ func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContac
 	}
 
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
-
+	s.StoreChatKey(id, lid, jid, lid)
 	return &WookContact{
 		RemoteJid:     jid,
 		PushName:      evt.NewPushName,
@@ -1045,7 +871,7 @@ func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContac
 }
 
 func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact {
-	url, b64, err := s.getPic(id, evt.JID)
+	url, b64, err := s.getPic(id, evt.JID, false) // don't fetch profile pic on events; only when requested via API
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
 	}
@@ -1055,7 +881,7 @@ func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact 
 	}
 
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
-
+	s.StoreChatKey(id, lid, jid, lid)
 	return &WookContact{
 		RemoteJid:     jid,
 		InstanceId:    id,
@@ -1066,7 +892,7 @@ func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact 
 }
 
 func (s *Whatsmiau) convertBusinessName(id string, evt *events.BusinessName) *WookContact {
-	url, b64, err := s.getPic(id, evt.JID)
+	url, b64, err := s.getPic(id, evt.JID, false) // don't fetch profile pic on events; only when requested via API
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
 	}
@@ -1087,7 +913,7 @@ func (s *Whatsmiau) convertBusinessName(id string, evt *events.BusinessName) *Wo
 	}
 
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
-
+	s.StoreChatKey(id, lid, jid, lid)
 	return &WookContact{
 		RemoteJid:     jid,
 		InstanceId:    id,
@@ -1098,7 +924,10 @@ func (s *Whatsmiau) convertBusinessName(id string, evt *events.BusinessName) *Wo
 	}
 }
 
-func (s *Whatsmiau) getPic(id string, jid types.JID) (string, string, error) {
+func (s *Whatsmiau) getPic(id string, jid types.JID, fetchProfilePic bool) (string, string, error) {
+	if !fetchProfilePic {
+		return "", "", nil
+	}
 	client, ok := s.clients.Load(id)
 	if !ok || client == nil {
 		zap.L().Warn("no client for event", zap.String("id", id))

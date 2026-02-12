@@ -255,6 +255,12 @@ func canIgnoreMessage(msg *events.Message) bool {
 	return strings.Contains(msg.Info.Chat.String(), "status")
 }
 
+// isGroupOrChannelJID returns true if the JID is a group, channel (newsletter) or broadcast.
+// We never emit events for groups, channels or broadcast.
+func isGroupOrChannelJID(jid string) bool {
+	return strings.HasSuffix(jid, "@g.us") || strings.HasSuffix(jid, "@newsletter") || strings.HasSuffix(jid, "@broadcast")
+}
+
 // canIgnoreGroup returns true if group can be ignored
 func canIgnoreGroup(evt interface{}, instance *models.Instance) bool {
 	if !instance.GroupsIgnore {
@@ -270,13 +276,6 @@ func canIgnoreGroup(evt interface{}, instance *models.Instance) bool {
 		}
 
 		jid = msg.Info.Chat.String()
-	case *events.GroupInfo:
-		gInfo, ok := evt.(*events.GroupInfo)
-		if !ok {
-			return false
-		}
-
-		jid = gInfo.JID.String()
 	case *events.Receipt:
 		rcp, ok := evt.(*events.Receipt)
 		if !ok {

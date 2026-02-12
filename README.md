@@ -222,7 +222,7 @@ The application can send webhook events for the following actions:
 | `CONNECTION_UPDATE` | Triggered when the device connects (pairing/QR success).            |
 | `SESSION_LOST`      | Triggered when the WhatsApp session is lost (Router/Redis setup).    |
 
-When `WEBHOOK_URL` is set, the API sends a **`ready`** event (no subscription needed) once at startup when the server has finished initializing and is about to listen.
+When `WEBHOOK_URL` is set, the API sends a **`session.connected`** event (no subscription needed) once at startup when the server has finished initializing (with empty `instance` and `phoneNumber`), and again for each device when it connects (with `instance` and `phoneNumber`).
 
 **Note:** Only events you subscribe to (in `webhook.events` when creating/updating the instance) are sent. API errors (e.g. "instance already exists", "context deadline exceeded") and internal library logs (e.g. "Successfully paired") are not webhook events and are never posted to the webhook URL.
 

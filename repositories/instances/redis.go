@@ -249,3 +249,55 @@ func (s *RedisInstance) DeleteRoute(ctx context.Context, instanceID string) erro
 	}
 	return s.db.Del(ctx, redisKeyRoutePrefix+instanceID).Err()
 }
+
+// TTL for emitted message keys: avoid re-emitting duplicates for 7 days; keys expire automatically.
+const emittedMessageTTL = 7 * 24 * time.Hour
+
+func (s *RedisInstance) keyEmittedMessage(instanceID, messageKey string) string {
+	return fmt.Sprintf("emitted:%s:%s", instanceID, messageKey)
+}
+
+// WasMessageEmitted returns true if we already emitted a webhook event for this message (same instance + message key).
+func (s *RedisInstance) WasMessageEmitted(ctx context.Context, instanceID, messageKey string) (bool, error) {
+	if instanceID == "" || messageKey == "" {
+		return false, nil
+	}
+	n, err := s.db.Exists(ctx, s.keyEmittedMessage(instanceID, messageKey)).Result()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// MarkMessageEmitted records that we emitted a webhook event for this message so we don't send duplicates.
+func (s *RedisInstance) MarkMessageEmitted(ctx context.Context, instanceID, messageKey string) error {
+	if instanceID == "" || messageKey == "" {
+		return nil
+	}
+	return s.db.Set(ctx, s.keyEmittedMessage(instanceID, messageKey), "1", emittedMessageTTL).Err()
+}
+
+// DeleteEmittedMessagesForInstance removes all emitted-message keys for this instance (e.g. on teardown).
+func (s *RedisInstance) DeleteEmittedMessagesForInstance(ctx context.Context, instanceID string) error {
+	if instanceID == "" {
+		return nil
+	}
+	pattern := fmt.Sprintf("emitted:%s:*", instanceID)
+	var cursor uint64
+	for {
+		keys, next, err := s.db.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			if err := s.db.Del(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return nil
+}

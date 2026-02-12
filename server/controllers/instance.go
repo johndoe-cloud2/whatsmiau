@@ -329,3 +329,24 @@ func (s *Instance) Delete(ctx echo.Context) error {
 		Message: "instance deleted",
 	})
 }
+
+// DeleteAll deletes all instances when no id is provided (called from DELETE /instance with no path id).
+func (s *Instance) DeleteAll(ctx echo.Context) error {
+	c := ctx.Request().Context()
+
+	all, err := s.repo.List(c, "")
+	if err != nil {
+		zap.L().Error("failed to list instances", zap.Error(err))
+		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to list instances")
+	}
+
+	for _, inst := range all {
+		if err := s.whatsmiau.Disconnect(inst.ID); err != nil {
+			zap.L().Error("failed to delete instance", zap.String("id", inst.ID), zap.Error(err))
+		}
+	}
+
+	return ctx.JSON(http.StatusOK, dto.DeleteInstanceResponse{
+		Message: "instances deleted",
+	})
+}

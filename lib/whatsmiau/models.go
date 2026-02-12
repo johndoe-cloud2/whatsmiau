@@ -13,8 +13,8 @@ const (
 	WookMessagesUpdate   Wook = "messages.update"
 	WookContactsUpsert   Wook = "contacts.upsert"
 	WookSessionLost      Wook = "session.lost"
+	WookSessionConnected Wook = "session.connected"
 	WookConnectionUpdate Wook = "connection.update"
-	WookReady            Wook = "ready"
 )
 
 type WookEvent[data any] struct {
@@ -28,16 +28,33 @@ type WookEvent[data any] struct {
 	Event       Wook      `json:"event,omitempty"`
 }
 
+// WookMessageContent is the message body in messages.upsert: text and/or file base64; each null when not present.
+type WookMessageContent struct {
+	Message    *string `json:"message"`    // text (or caption), null if none
+	FileBase64 *string `json:"fileBase64"` // base64 of image/audio/document/video, null if none
+}
+
+// WookMessageUpsertPayload is the flat payload sent to the webhook for messages.upsert (incoming and outgoing).
+type WookMessageUpsertPayload struct {
+	Instance    string             `json:"instance,omitempty"`
+	PhoneNumber string             `json:"phoneNumber,omitempty"`
+	FromMe      bool               `json:"fromMe"`
+	Message     WookMessageContent `json:"message"`
+	DateTime    time.Time          `json:"date_time,omitempty"`
+	Event       Wook               `json:"event,omitempty"`
+}
+
+// WookMessageKey is the key we emit in message events: only phoneNumber (participant without @suffix).
+type WookMessageKey struct {
+	PhoneNumber string `json:"phoneNumber,omitempty"`
+}
+
 type WookMessageData struct {
-	Key              *WookKey                `json:"key,omitempty"`
-	PushName         string                  `json:"pushName,omitempty"`
-	Status           string                  `json:"status,omitempty"`
-	Message          *WookMessageRaw         `json:"message,omitempty"`
-	ContextInfo      *WookMessageContextInfo `json:"contextInfo,omitempty"`
-	MessageType      string                  `json:"messageType,omitempty"`
-	MessageTimestamp int                     `json:"messageTimestamp,omitempty"`
-	InstanceId       string                  `json:"instanceId,omitempty"`
-	Source           string                  `json:"source,omitempty"`
+	Key         *WookMessageKey `json:"key,omitempty"`
+	PushName    string          `json:"pushName,omitempty"`
+	Message     *WookMessageRaw `json:"message,omitempty"`
+	MessageType string          `json:"messageType,omitempty"`
+	InstanceId  string          `json:"instanceId,omitempty"`
 }
 
 type WookMessageContextInfo struct {
@@ -94,6 +111,7 @@ type WookKey struct {
 type WookMessageRaw struct {
 	Conversation         string                   `json:"conversation,omitempty"`
 	Base64               string                   `json:"base64,omitempty"`
+	Filebase64           *string                  `json:"filebase64"` // base64 del archivo si hay medio; null si no
 	ImageMessage         *WookImageMessageRaw     `json:"imageMessage,omitempty"`
 	DocumentMessage      *WookDocumentMessageRaw  `json:"documentMessage,omitempty"`
 	VideoMessage         *WookVideoMessageRaw     `json:"videoMessage,omitempty"`

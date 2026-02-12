@@ -22,6 +22,12 @@ import (
 	"golang.org/x/net/context"
 )
 
+// ChatKeyCache stores remoteJid and remoteLid for a chat, so events that arrive only with LID can be resolved to full key data.
+type ChatKeyCache struct {
+	RemoteJid string
+	RemoteLid string
+}
+
 type Whatsmiau struct {
 	clients          *xsync.Map[string, *whatsmeow.Client]
 	container        *sqlstore.Container
@@ -35,6 +41,8 @@ type Whatsmiau struct {
 	httpClient       *http.Client
 	fileStorage      interfaces.Storage
 	handlerSemaphore chan struct{}
+	// chatKeyCache: key "instanceID:lid" -> ChatKeyCache, so we can resolve LID to remoteJid when an event has no remoteJid.
+	chatKeyCache *xsync.Map[string, ChatKeyCache]
 }
 
 var instance *Whatsmiau
@@ -79,6 +87,7 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 	clientLog := waLog.Stdout("Client", level, false)
 	for _, device := range deviceStore {
 		client := whatsmeow.NewClient(device, clientLog)
+		client.ManualHistorySyncDownload = true // don't auto-download history on connect; only when requested via API
 		if client.Store.ID == nil {
 			zap.L().Error("device without id on db", zap.Any("device", device))
 			continue
@@ -137,6 +146,7 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 		},
 		fileStorage:      storage,
 		handlerSemaphore: make(chan struct{}, env.Env.HandlerSemaphoreSize),
+		chatKeyCache:     xsync.NewMap[string, ChatKeyCache](),
 	}
 
 	go instance.startEmitter()
@@ -163,6 +173,11 @@ func (s *Whatsmiau) Connect(ctx context.Context, id string) (string, error) {
 		return qr, nil
 	}
 
+	// Re-check in case another goroutine just finished pairing (e.g. poll after success)
+	if client.IsLoggedIn() {
+		return "", nil
+	}
+
 	qrCode, err := s.observeAndQrCode(ctx, id, client)
 	if err != nil {
 		return "", err
@@ -184,6 +199,7 @@ func (s *Whatsmiau) generateClient(ctx context.Context, id string) (*whatsmeow.C
 	if !ok {
 		device := s.container.NewDevice()
 		client = whatsmeow.NewClient(device, s.logger)
+		client.ManualHistorySyncDownload = true // don't auto-download history on connect; only when requested via API
 		s.clients.Store(id, client)
 	}
 
@@ -197,10 +213,15 @@ func (s *Whatsmiau) generateClient(ctx context.Context, id string) (*whatsmeow.C
 			return nil, nil
 		}
 
-		if err := client.Connect(); err == nil {
-			if client.IsLoggedIn() {
-				return nil, nil
-			}
+		_ = client.Connect()
+		if client.IsLoggedIn() {
+			return nil, nil
+		}
+
+		// Session exists (Store.ID set) but not yet logged in (e.g. reconnecting after QR scan).
+		// Do not delete the device or we would lose the session and show a new QR.
+		if client.Store != nil && client.Store.ID != nil {
+			return nil, nil
 		}
 
 		s.clients.Delete(id)
@@ -211,7 +232,8 @@ func (s *Whatsmiau) generateClient(ctx context.Context, id string) (*whatsmeow.C
 
 		device := s.container.NewDevice()
 		client = whatsmeow.NewClient(device, s.logger)
-		s.clients.Store(id, client) // replaces old client
+		client.ManualHistorySyncDownload = true // don't auto-download history on connect; only when requested via API
+		s.clients.Store(id, client)             // replaces old client
 	}
 
 	return client, nil
@@ -243,7 +265,8 @@ func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string) {
 		zap.L().Debug("stopping observer connection", zap.String("id", id))
 		s.observerRunning.Delete(id)
 		s.qrCache.Delete(id)
-		s.lockConnection.Delete(id)
+		// Do not delete lockConnection here so other Connect() calls block on the same lock
+		// until the current one finishes and reports "already connected"
 	}()
 
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute*2)
@@ -329,6 +352,11 @@ func (s *Whatsmiau) observeAndQrCode(ctx context.Context, id string, client *wha
 	for {
 		select {
 		case <-ticker.C:
+			// Device may have been paired in observeConnection; return without QR so API reports "already connected"
+			if client.IsLoggedIn() {
+				zap.L().Debug("client logged in while waiting for QR, returning without QR", zap.String("id", id))
+				return "", nil
+			}
 			qrCode, ok := s.qrCache.Load(id)
 			if ok && len(qrCode) > 0 {
 				zap.L().Debug("got qr code from cache", zap.String("id", id))
@@ -468,4 +496,99 @@ func (s *Whatsmiau) extractJidLid(ctx context.Context, id string, jid types.JID)
 	}
 
 	return jid.ToNonAD().String(), ""
+}
+
+// StoreChatKey saves the chat key (remoteJid, remoteLid) for the given instance and LID.
+// When an event later arrives with only LID, ResolveChatKey can return the full key data.
+func (s *Whatsmiau) StoreChatKey(instanceID, lid, remoteJid, remoteLid string) {
+	if lid == "" {
+		return
+	}
+	key := instanceID + ":" + lid
+	s.chatKeyCache.Store(key, ChatKeyCache{RemoteJid: remoteJid, RemoteLid: remoteLid})
+}
+
+// ResolveChatKey returns the stored remoteJid and remoteLid for the given instance and LID.
+// ok is false if the LID was never stored (e.g. no event from that chat yet).
+func (s *Whatsmiau) ResolveChatKey(instanceID, lid string) (remoteJid, remoteLid string, ok bool) {
+	if lid == "" {
+		return "", "", false
+	}
+	key := instanceID + ":" + lid
+	cache, ok := s.chatKeyCache.Load(key)
+	if !ok {
+		return "", "", false
+	}
+	return cache.RemoteJid, cache.RemoteLid, true
+}
+
+// ClearChatKeyCache removes all stored chat keys for the given instance (e.g. on teardown).
+func (s *Whatsmiau) ClearChatKeyCache(instanceID string) {
+	prefix := instanceID + ":"
+	s.chatKeyCache.Range(func(key string, _ ChatKeyCache) bool {
+		if strings.HasPrefix(key, prefix) {
+			s.chatKeyCache.Delete(key)
+		}
+		return true
+	})
+}
+
+// ResolveChatKeyFromStore resolves remoteJid from the client's LID store when we have only lid (e.g. event key without remoteJid).
+// Uses GetPNForLID. On success, stores the result in chatKeyCache for next time.
+func (s *Whatsmiau) ResolveChatKeyFromStore(ctx context.Context, instanceID, lid string) (remoteJid, remoteLid string, ok bool) {
+	if lid == "" {
+		return "", "", false
+	}
+	client, ok := s.clients.Load(instanceID)
+	if !ok {
+		return "", "", false
+	}
+	if client.Store == nil || client.Store.LIDs == nil {
+		return "", "", false
+	}
+	lidJID, err := types.ParseJID(lid)
+	if err != nil {
+		return "", "", false
+	}
+	if lidJID.Server != types.HiddenUserServer {
+		// Ensure we have LID server for GetPNForLID
+		lidJID.Server = types.HiddenUserServer
+	}
+	pnJID, err := client.Store.LIDs.GetPNForLID(ctx, lidJID)
+	if err != nil || pnJID.IsEmpty() {
+		return "", "", false
+	}
+	remoteJid = pnJID.ToNonAD().String()
+	remoteLid = lid
+	s.StoreChatKey(instanceID, lid, remoteJid, remoteLid)
+	return remoteJid, remoteLid, true
+}
+
+// ResolveLidFromStore resolves remoteLid from the client's LID store when we have remoteJid (PN) but no lid.
+// Uses GetLIDForPN. On success, stores the result in chatKeyCache.
+func (s *Whatsmiau) ResolveLidFromStore(ctx context.Context, instanceID, remoteJid string) (remoteLid string, ok bool) {
+	if remoteJid == "" || strings.HasSuffix(remoteJid, "@lid") {
+		return "", false
+	}
+	client, ok := s.clients.Load(instanceID)
+	if !ok {
+		return "", false
+	}
+	if client.Store == nil || client.Store.LIDs == nil {
+		return "", false
+	}
+	pnJID, err := types.ParseJID(remoteJid)
+	if err != nil {
+		return "", false
+	}
+	if pnJID.Server != types.DefaultUserServer {
+		pnJID.Server = types.DefaultUserServer
+	}
+	lidJID, err := client.Store.LIDs.GetLIDForPN(ctx, pnJID)
+	if err != nil || lidJID.IsEmpty() {
+		return "", false
+	}
+	remoteLid = lidJID.ToNonAD().String()
+	s.StoreChatKey(instanceID, remoteLid, remoteJid, remoteLid)
+	return remoteLid, true
 }

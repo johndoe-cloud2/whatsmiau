@@ -47,4 +47,4 @@ To receive webhooks from the internet (e.g. a cloud server), use a public URL (n
 | `CONTACTS_UPSERT`   | Contact created or updated. |
 | `CONNECTION_UPDATE` | Device connected (pairing/QR success). |
 | `SESSION_LOST`      | WhatsApp session lost (when using Router/Redis). |
-| `ready`             | Sent once at API startup when `WEBHOOK_URL` is set (no subscription). |
+| `session.connected` | Sent at API startup (instance/phoneNumber empty) when `WEBHOOK_URL` is set, and when each device connects (instance, phoneNumber). |

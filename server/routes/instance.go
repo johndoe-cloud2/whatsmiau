@@ -14,6 +14,7 @@ func Instance(group *echo.Group) {
 	controller := controllers.NewInstances(redisInstance, whatsmiau.Get())
 	group.POST("", controller.Create)
 	group.GET("", controller.List)
+	group.DELETE("", controller.DeleteAll)
 	group.POST("/:id/connect", controller.Connect)
 	group.POST("/:id/logout", controller.Logout)
 	group.DELETE("/:id", controller.Delete)
