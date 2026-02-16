@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/http"
+	"strings"
 
 	"github.com/verbeux-ai/whatsmiau/env"
 	"github.com/verbeux-ai/whatsmiau/lib/whatsmiau"
@@ -180,7 +181,28 @@ func (s *Instance) Connect(ctx echo.Context) error {
 	}
 
 	if len(result) == 0 {
-		return utils.HTTPFail(ctx, http.StatusNotFound, err, "instance not found")
+		// Create instance directly so Connect works without a prior Create call
+		newInstance := &models.Instance{ID: request.ID}
+		if len(env.Env.ProxyAddresses) > 0 {
+			rd := rand.IntN(len(env.Env.ProxyAddresses))
+			proxy, err := parseProxyURL(env.Env.ProxyAddresses[rd])
+			if err != nil {
+				zap.L().Warn("connect: invalid proxy url on env, skipping proxy", zap.Error(err))
+			} else {
+				newInstance.InstanceProxy = *proxy
+			}
+		}
+		if err := s.repo.Create(c, newInstance); err != nil {
+			zap.L().Error("failed to create instance on connect", zap.Error(err), zap.String("id", request.ID))
+			return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to create instance")
+		}
+		if env.Env.BackendPublicURL != "" {
+			if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
+				if err := redisRepo.SetRoute(c, newInstance.ID, env.Env.BackendPublicURL); err != nil {
+					zap.L().Warn("failed to set route in Redis", zap.Error(err), zap.String("instance", newInstance.ID))
+				}
+			}
+		}
 	}
 
 	qrCode, err := s.whatsmiau.Connect(c, request.ID)
@@ -201,9 +223,26 @@ func (s *Instance) Connect(ctx echo.Context) error {
 		})
 	}
 
+	// Instance already connected: get fresh data (RemoteJID was set by observer on QR success)
+	connectedInstances, err := s.repo.List(c, request.ID)
+	if err != nil {
+		zap.L().Error("failed to list instance after connect", zap.Error(err))
+		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to list instance")
+	}
+	phoneNumber := ""
+	if len(connectedInstances) > 0 && connectedInstances[0].RemoteJID != "" {
+		// JID can be "5493512275498:37@s.whatsapp.net" (suffix :NN is LID); return only the clean number
+		beforeAt := strings.Split(connectedInstances[0].RemoteJID, "@")[0]
+		if idx := strings.Index(beforeAt, ":"); idx != -1 {
+			phoneNumber = beforeAt[:idx]
+		} else {
+			phoneNumber = beforeAt
+		}
+	}
 	return ctx.JSON(http.StatusOK, dto.ConnectInstanceResponse{
-		Message:   "instance already connected",
-		Connected: true,
+		Message:     "instance already connected",
+		Connected:   true,
+		PhoneNumber: phoneNumber,
 	})
 }
 
@@ -221,7 +260,27 @@ func (s *Instance) ConnectQRBuffer(ctx echo.Context) error {
 	}
 
 	if len(result) == 0 {
-		return utils.HTTPFail(ctx, http.StatusNotFound, err, "instance not found")
+		newInstance := &models.Instance{ID: request.ID}
+		if len(env.Env.ProxyAddresses) > 0 {
+			rd := rand.IntN(len(env.Env.ProxyAddresses))
+			proxy, err := parseProxyURL(env.Env.ProxyAddresses[rd])
+			if err != nil {
+				zap.L().Warn("connect QR buffer: invalid proxy url on env, skipping proxy", zap.Error(err))
+			} else {
+				newInstance.InstanceProxy = *proxy
+			}
+		}
+		if err := s.repo.Create(c, newInstance); err != nil {
+			zap.L().Error("failed to create instance on connect QR buffer", zap.Error(err), zap.String("id", request.ID))
+			return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to create instance")
+		}
+		if env.Env.BackendPublicURL != "" {
+			if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
+				if err := redisRepo.SetRoute(c, newInstance.ID, env.Env.BackendPublicURL); err != nil {
+					zap.L().Warn("failed to set route in Redis", zap.Error(err), zap.String("instance", newInstance.ID))
+				}
+			}
+		}
 	}
 
 	qrCode, err := s.whatsmiau.Connect(c, request.ID)

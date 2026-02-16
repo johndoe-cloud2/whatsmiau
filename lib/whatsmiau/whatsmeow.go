@@ -469,6 +469,9 @@ func (s *Whatsmiau) extractJidLid(ctx context.Context, id string, jid types.JID)
 	if !ok {
 		return jid.ToNonAD().String(), ""
 	}
+	if client.Store == nil || client.Store.LIDs == nil {
+		return jid.ToNonAD().String(), ""
+	}
 
 	if jid.Server == types.DefaultUserServer {
 		lid, err := client.Store.LIDs.GetLIDForPN(ctx, jid)
