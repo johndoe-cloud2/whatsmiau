@@ -234,6 +234,11 @@ func (s *RedisInstance) UnregisterBackend(ctx context.Context, url string) error
 	return s.db.SRem(ctx, redisKeyBackends, url).Err()
 }
 
+// GetAllBackends returns all backend URLs registered in Redis (for cleanup/health checks).
+func (s *RedisInstance) GetAllBackends(ctx context.Context) ([]string, error) {
+	return s.db.SMembers(ctx, redisKeyBackends).Result()
+}
+
 // SetRoute sets route:<instanceID> = backendURL so the router can proxy requests for this instance to this backend.
 func (s *RedisInstance) SetRoute(ctx context.Context, instanceID, backendURL string) error {
 	if instanceID == "" || backendURL == "" {

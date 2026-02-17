@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -61,6 +62,10 @@ func main() {
 		Transport: &http.Transport{
 			MaxIdleConns:    100,
 			IdleConnTimeout: 90 * time.Second,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				d := &net.Dialer{Timeout: 10 * time.Second}
+				return d.DialContext(ctx, network, addr)
+			},
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			zap.L().Error("proxy to backend failed", zap.String("path", r.URL.Path), zap.String("host", r.Host), zap.Error(err))

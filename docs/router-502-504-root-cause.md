@@ -2,6 +2,30 @@
 
 Este documento explica **por qué** ocurrían los errores 502 Bad Gateway y 504 Gateway Time-out al llamar al API (p. ej. `POST /v1/instance`) y qué cambios se hicieron en la raíz.
 
+---
+
+## 502 en producción (ases / URL de producción): qué comprobar
+
+El **502** puede venir del **ALB** o del **router**:
+
+| Dónde ves 502 | Origen | Qué hacer |
+|---------------|--------|-----------|
+| **En /health o /** | Lo devuelve el **ALB**: no hay targets sanos en el target group. El router no responde o falla el health check (GET /). | Revisar ECS: cluster → servicio **whatsmiau-router** → tareas running. Si no hay tareas o están en "Unhealthy", revisar logs del router y que el ALB pueda alcanzar el puerto 8080. |
+| **En /v1/instance u otras rutas API** | Lo devuelve el **router**: tiene backends en Redis pero **no puede conectar** al backend (proxy falla). | Ver abajo "Si en local funciona pero desplegado no": logs del router (¿backends_count > 0? ¿"proxy to backend failed"?), logs del backend (¿"registered backend in Redis"?). Revisar security groups (router → backend 8080). |
+
+**Comandos rápidos:**
+
+```bash
+# Ver qué código devuelve cada ruta (ases)
+make api-test PROFILE=ases
+# 502 en /health → problema ALB/router (targets). 502 solo en /v1/... → problema backend o red.
+
+# Logs recientes (router + backend)
+make logs-fetch HOURS=1
+```
+
+---
+
 ## Flujo de la petición
 
 ```

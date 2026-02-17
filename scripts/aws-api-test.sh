@@ -13,11 +13,11 @@ ENV_FILE="$REPO_ROOT/.env.$AWS_PROFILE"
 [ ! -f "$ENV_FILE" ] && ENV_FILE="$REPO_ROOT/.env.production"
 [ -f "$ENV_FILE" ] && set -a && source "$ENV_FILE" && set +a
 
-# Base URL of the deployed API (HTTPS if you use a domain with TLS)
+# Base URL of the deployed API. Foxy has no cert on ALB by default → use HTTP; set API_BASE_URL=https://... if you use a TLS proxy.
 if [ -z "$API_BASE_URL" ]; then
   case "$AWS_PROFILE" in
     ases)  API_BASE_URL="https://whatsmiau.asesadmin.com" ;;
-    foxy)  API_BASE_URL="https://whatsmiau.foxyadminbot.info" ;;
+    foxy)  API_BASE_URL="http://whatsmiau.foxyadminbot.info" ;;
     *)     API_BASE_URL="http://localhost:8080" ;;
   esac
 fi
