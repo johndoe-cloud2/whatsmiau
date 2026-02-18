@@ -733,33 +733,67 @@ func (s *Whatsmiau) uploadMessageFile(ctx context.Context, instance *models.Inst
 
 	defer os.Remove(tmpFile.Name())
 	if err := client.DownloadToFile(ctx, fileMessage, tmpFile); err != nil {
-		zap.L().Error("failed to download image", zap.Error(err))
+		zap.L().Error("failed to download media", zap.Error(err))
 		return "", ""
 	}
 
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		zap.L().Error("failed to seek image", zap.Error(err))
+		zap.L().Error("failed to seek media", zap.Error(err))
 	}
 
-	ext = extractExtFromFile(fileName, mimetype, tmpFile)
+	// If received file is PDF, convert first page to PNG at 2x resolution so we avoid PDF handling issues.
+	var mediaData []byte
+	head := make([]byte, 8)
+	if _, err := tmpFile.Read(head); err == nil {
+		_, _ = tmpFile.Seek(0, io.SeekStart)
+		isPDF := bytes.HasPrefix(head, []byte("%PDF")) ||
+			strings.Contains(strings.ToLower(mimetype), "pdf") ||
+			strings.HasSuffix(strings.ToLower(fileName), ".pdf")
+		if isPDF {
+			if pngBytes, err := convertPDFToPNG(tmpFile.Name()); err != nil {
+				zap.L().Warn("PDF to PNG conversion failed, using original file", zap.Error(err))
+			} else {
+				mediaData = pngBytes
+				ext = "png"
+				mimetype = "image/png"
+			}
+		}
+	} else {
+		_, _ = tmpFile.Seek(0, io.SeekStart)
+	}
+
+	if len(mediaData) == 0 {
+		ext = extractExtFromFile(fileName, mimetype, tmpFile)
+	}
+
 	// Include base64 when instance has webhook.base64 or when using global WEBHOOK_URL (so webhook always gets decoded media)
 	includeBase64 := (instance.Webhook.Base64 != nil && *instance.Webhook.Base64) || env.Env.WebhookURL != ""
 	if includeBase64 {
-		data, err := io.ReadAll(tmpFile)
-		if err != nil {
-			zap.L().Error("failed to read image", zap.Error(err))
+		if len(mediaData) > 0 {
+			b64Result = base64.StdEncoding.EncodeToString(mediaData)
 		} else {
-			b64Result = base64.StdEncoding.EncodeToString(data)
+			if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+				zap.L().Error("failed to seek before reading file", zap.Error(err))
+			}
+			data, err := io.ReadAll(tmpFile)
+			if err != nil {
+				zap.L().Error("failed to read media", zap.Error(err))
+			} else {
+				b64Result = base64.StdEncoding.EncodeToString(data)
+			}
 		}
 	}
 	if s.fileStorage != nil {
-		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-			zap.L().Error("failed to seek image", zap.Error(err))
+		if len(mediaData) > 0 {
+			urlResult, _, err = s.fileStorage.Upload(ctx, uuid.NewString()+"."+ext, mimetype, bytes.NewReader(mediaData))
+		} else {
+			if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+				zap.L().Error("failed to seek media", zap.Error(err))
+			}
+			urlResult, _, err = s.fileStorage.Upload(ctx, uuid.NewString()+"."+ext, mimetype, tmpFile)
 		}
-
-		urlResult, _, err = s.fileStorage.Upload(ctx, uuid.NewString()+"."+ext, mimetype, tmpFile)
 		if err != nil {
-			zap.L().Error("failed to upload image", zap.Error(err))
+			zap.L().Error("failed to upload media", zap.Error(err))
 		}
 	}
 

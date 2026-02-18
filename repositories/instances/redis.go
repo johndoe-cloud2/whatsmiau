@@ -255,6 +255,43 @@ func (s *RedisInstance) DeleteRoute(ctx context.Context, instanceID string) erro
 	return s.db.Del(ctx, redisKeyRoutePrefix+instanceID).Err()
 }
 
+// DeleteRoutesForBackend removes all route:<id> keys whose value equals backendURL.
+// Call this on SIGTERM so the router stops proxying instance requests to this (shutting down) backend.
+// Returns the number of routes deleted.
+func (s *RedisInstance) DeleteRoutesForBackend(ctx context.Context, backendURL string) (int, error) {
+	if backendURL == "" {
+		return 0, nil
+	}
+	var cursor uint64
+	deleted := 0
+	for {
+		keys, next, err := s.db.Scan(ctx, cursor, redisKeyRoutePrefix+"*", 100).Result()
+		if err != nil {
+			return deleted, err
+		}
+		for _, k := range keys {
+			val, err := s.db.Get(ctx, k).Result()
+			if err == redis.Nil {
+				continue
+			}
+			if err != nil {
+				continue
+			}
+			if val == backendURL {
+				if err := s.db.Del(ctx, k).Err(); err != nil {
+					continue
+				}
+				deleted++
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return deleted, nil
+}
+
 // TTL for emitted message keys: avoid re-emitting duplicates for 7 days; keys expire automatically.
 const emittedMessageTTL = 7 * 24 * time.Hour
 

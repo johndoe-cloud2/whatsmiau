@@ -88,7 +88,7 @@ func main() {
 		} else {
 			zap.L().Info("registered backend in Redis", zap.String("url", env.Env.BackendPublicURL))
 		}
-		// On SIGTERM/SIGINT (e.g. ECS stop), unregister so the router does not keep proxying to this task.
+		// On SIGTERM/SIGINT (e.g. ECS stop), unregister and delete routes so the router stops proxying to this task.
 		go func() {
 			sig := make(chan os.Signal, 1)
 			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -96,6 +96,11 @@ func main() {
 			zap.L().Info("shutdown signal received, unregistering backend from Redis")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			if n, err := redisRepo.DeleteRoutesForBackend(ctx, env.Env.BackendPublicURL); err != nil {
+				zap.L().Warn("failed to delete routes for backend from Redis", zap.Error(err))
+			} else {
+				zap.L().Info("deleted routes for backend in Redis", zap.String("url", env.Env.BackendPublicURL), zap.Int("count", n))
+			}
 			if err := redisRepo.UnregisterBackend(ctx, env.Env.BackendPublicURL); err != nil {
 				zap.L().Warn("failed to unregister backend from Redis", zap.Error(err))
 			} else {

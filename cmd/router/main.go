@@ -67,16 +67,22 @@ func main() {
 				return d.DialContext(ctx, network, addr)
 			},
 		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			zap.L().Error("proxy to backend failed", zap.String("path", r.URL.Path), zap.String("host", r.Host), zap.Error(err))
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		},
+		ErrorHandler: nil, // set below after handler is created
 	}
 
 	handler := &routerHandler{
 		redis:  rdb,
 		proxy:  proxy,
 		apiKey: cfg.APIKey,
+	}
+	// On 502 for instance requests, delete stale route so next request uses fallback backend
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		zap.L().Error("proxy to backend failed", zap.String("path", r.URL.Path), zap.String("host", r.Host), zap.Error(err))
+		if id := extractInstanceID(r.URL.Path); id != "" {
+			_ = rdb.Del(context.Background(), redisKeyRoutePrefix+id).Err()
+			zap.L().Info("deleted stale route after 502", zap.String("instance", id))
+		}
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	}
 
 	addr := ":" + cfg.Port
@@ -126,11 +132,19 @@ func (h *routerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if instanceID != "" {
 		backendURL, _ = h.redis.Get(ctx, redisKeyRoutePrefix+instanceID).Result()
 		if backendURL == "" {
-			zap.L().Warn("no route for instance", zap.String("instance", instanceID))
-			http.Error(w, "No backend for this instance", http.StatusServiceUnavailable)
-			return
+			// No route (e.g. backend that owned this instance was replaced). Fallback to any backend
+			// so connect/status/etc can be handled (another backend can take over).
+			urls, err := h.redis.SMembers(ctx, redisKeyBackends).Result()
+			if err != nil || len(urls) == 0 {
+				zap.L().Warn("no route for instance and no backends", zap.String("instance", instanceID))
+				http.Error(w, "No backend for this instance", http.StatusServiceUnavailable)
+				return
+			}
+			backendURL = urls[0]
+			zap.L().Info("no route for instance, using fallback backend", zap.String("instance", instanceID), zap.String("backend", backendURL))
 		}
-	} else {
+	}
+	if backendURL == "" {
 		urls, err := h.redis.SMembers(ctx, redisKeyBackends).Result()
 		if err != nil {
 			zap.L().Warn("no backends available", zap.Error(err))

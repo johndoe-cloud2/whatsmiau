@@ -146,7 +146,7 @@ func (s *Message) SendAudio(ctx echo.Context) error {
 	})
 }
 
-// For evolution compatibility
+// For evolution compatibility. Only image media type is supported.
 func (s *Message) SendMedia(ctx echo.Context) error {
 	var request dto.SendMediaRequest
 	if err := ctx.Bind(&request); err != nil {
@@ -156,35 +156,27 @@ func (s *Message) SendMedia(ctx echo.Context) error {
 	if err := validator.New().Struct(&request); err != nil {
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid request body")
 	}
-	switch request.Mediatype {
-	case "image":
-		request.SendDocumentRequest.Mimetype = "image/png"
-		return s.sendImage(ctx, request.SendDocumentRequest)
+	if request.Mediatype != "image" {
+		return utils.HTTPFail(ctx, http.StatusBadRequest, nil, "only image media type is supported")
 	}
-
-	return s.sendDocument(ctx, request.SendDocumentRequest)
+	request.SendDocumentRequest.Mimetype = "image/png"
+	return s.sendImage(ctx, request.SendDocumentRequest)
 }
 
+// SendDocument accepts a PDF URL (media), converts it to image and sends it. Only PDF is supported.
 func (s *Message) SendDocument(ctx echo.Context) error {
 	var request dto.SendDocumentRequest
 	if err := ctx.Bind(&request); err != nil {
 		return utils.HTTPFail(ctx, http.StatusUnprocessableEntity, err, "failed to bind request body")
 	}
-
 	if err := validator.New().Struct(&request); err != nil {
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid request body")
 	}
-
-	return s.sendDocument(ctx, request)
-}
-
-func (s *Message) sendDocument(ctx echo.Context, request dto.SendDocumentRequest) error {
 	jid, err := numberToJid(request.Number)
 	if err != nil {
 		zap.L().Error("error converting number to jid", zap.Error(err))
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid number format")
 	}
-
 	sendData := &whatsmiau.SendDocumentRequest{
 		InstanceID: request.InstanceID,
 		MediaURL:   request.Media,
@@ -193,16 +185,13 @@ func (s *Message) sendDocument(ctx echo.Context, request dto.SendDocumentRequest
 		RemoteJID:  jid,
 		Mimetype:   request.Mimetype,
 	}
-
 	c := ctx.Request().Context()
-	time.Sleep(time.Millisecond * time.Duration(request.Delay)) // TODO: create a more robust solution
-
+	time.Sleep(time.Millisecond * time.Duration(request.Delay))
 	res, err := s.whatsmiau.SendDocument(c, sendData)
 	if err != nil {
 		zap.L().Error("Whatsmiau.SendDocument failed", zap.Error(err))
 		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to send document")
 	}
-
 	return ctx.JSON(http.StatusOK, dto.SendDocumentResponse{
 		Key: dto.MessageResponseKey{
 			RemoteJid: request.Number,
@@ -210,7 +199,7 @@ func (s *Message) sendDocument(ctx echo.Context, request dto.SendDocumentRequest
 			Id:        res.ID,
 		},
 		Status:           "sent",
-		MessageType:      "documentMessage",
+		MessageType:      "imageMessage",
 		MessageTimestamp: int(res.CreatedAt.Unix() / 1000),
 		InstanceId:       request.InstanceID,
 	})
@@ -249,8 +238,8 @@ func (s *Message) sendImage(ctx echo.Context, request dto.SendDocumentRequest) e
 
 	res, err := s.whatsmiau.SendImage(c, sendData)
 	if err != nil {
-		zap.L().Error("Whatsmiau.SendDocument failed", zap.Error(err))
-		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to send document")
+		zap.L().Error("Whatsmiau.SendImage failed", zap.Error(err))
+		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to send image")
 	}
 
 	return ctx.JSON(http.StatusOK, dto.SendDocumentResponse{

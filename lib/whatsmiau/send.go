@@ -1,9 +1,9 @@
 package whatsmiau
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -91,12 +91,7 @@ func (s *Whatsmiau) SendAudio(ctx context.Context, data *SendAudioRequest) (*Sen
 		return nil, whatsmeow.ErrClientIsNil
 	}
 
-	resAudio, err := s.getCtx(ctx, data.AudioURL)
-	if err != nil {
-		return nil, err
-	}
-
-	dataBytes, err := io.ReadAll(resAudio.Body)
+	dataBytes, err := s.getMediaBytes(ctx, data.AudioURL)
 	if err != nil {
 		return nil, err
 	}
@@ -154,58 +149,19 @@ type SendDocumentResponse struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// SendDocument accepts a PDF URL, converts the first page to PNG, and sends it as an image. Only PDFs are supported.
 func (s *Whatsmiau) SendDocument(ctx context.Context, data *SendDocumentRequest) (*SendDocumentResponse, error) {
-	client, ok := s.clients.Load(data.InstanceID)
-	if !ok {
-		return nil, whatsmeow.ErrClientIsNil
-	}
-
-	resMedia, err := s.getCtx(ctx, data.MediaURL)
+	res, err := s.SendPDFAsImage(ctx, data)
 	if err != nil {
 		return nil, err
 	}
-
-	dataBytes, err := io.ReadAll(resMedia.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	uploaded, err := client.Upload(ctx, dataBytes, whatsmeow.MediaDocument)
-	if err != nil {
-		return nil, err
-	}
-
-	doc := waE2E.DocumentMessage{
-		URL:           proto.String(uploaded.URL),
-		Mimetype:      proto.String(data.Mimetype),
-		FileSHA256:    uploaded.FileSHA256,
-		FileLength:    proto.Uint64(uploaded.FileLength),
-		MediaKey:      uploaded.MediaKey,
-		FileName:      &data.FileName,
-		FileEncSHA256: uploaded.FileEncSHA256,
-		DirectPath:    proto.String(uploaded.DirectPath),
-		Caption:       proto.String(data.Caption),
-	}
-
-	res, err := client.SendMessage(ctx, *data.RemoteJID, &waE2E.Message{
-		DocumentMessage: &doc,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	instance := s.getInstance(data.InstanceID)
-	s.EmitMessageSent(instance, data.InstanceID, data.RemoteJID.ToNonAD().String(), res.ID, res.Timestamp, "documentMessage", &WookMessageRaw{DocumentMessage: &WookDocumentMessageRaw{Mimetype: data.Mimetype, FileName: data.FileName, Caption: data.Caption}}, "")
-
-	return &SendDocumentResponse{
-		ID:        res.ID,
-		CreatedAt: res.Timestamp,
-	}, nil
+	return &SendDocumentResponse{ID: res.ID, CreatedAt: res.CreatedAt}, nil
 }
 
 type SendImageRequest struct {
 	InstanceID string     `json:"instance_id"`
 	MediaURL   string     `json:"media_url"`
+	MediaBytes []byte     `json:"-"` // optional: send image from bytes instead of URL
 	Caption    string     `json:"caption"`
 	RemoteJID  *types.JID `json:"remote_jid"`
 	Mimetype   string     `json:"mimetype"`
@@ -221,14 +177,18 @@ func (s *Whatsmiau) SendImage(ctx context.Context, data *SendImageRequest) (*Sen
 		return nil, whatsmeow.ErrClientIsNil
 	}
 
-	resMedia, err := s.getCtx(ctx, data.MediaURL)
-	if err != nil {
-		return nil, err
-	}
-
-	dataBytes, err := io.ReadAll(resMedia.Body)
-	if err != nil {
-		return nil, err
+	var dataBytes []byte
+	var err error
+	if len(data.MediaBytes) > 0 {
+		dataBytes = data.MediaBytes
+		if data.Mimetype == "" {
+			data.Mimetype = "image/png"
+		}
+	} else {
+		dataBytes, err = s.getMediaBytes(ctx, data.MediaURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	uploaded, err := client.Upload(ctx, dataBytes, whatsmeow.MediaImage)
@@ -265,6 +225,29 @@ func (s *Whatsmiau) SendImage(ctx context.Context, data *SendImageRequest) (*Sen
 		ID:        res.ID,
 		CreatedAt: res.Timestamp,
 	}, nil
+}
+
+// SendPDFAsImage downloads the PDF from data.MediaURL, converts the first page to PNG (2.5 scale), and sends it as an image.
+// Requires pdftoppm (poppler-utils). Use endpoint POST /document with media URL pointing to a PDF.
+func (s *Whatsmiau) SendPDFAsImage(ctx context.Context, data *SendDocumentRequest) (*SendImageResponse, error) {
+	dataBytes, err := s.getMediaBytes(ctx, data.MediaURL)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.HasPrefix(dataBytes, []byte("%PDF")) {
+		return nil, fmt.Errorf("URL did not return a valid PDF")
+	}
+	pngBytes, err := convertPDFBytesToPNG(dataBytes)
+	if err != nil {
+		return nil, err
+	}
+	return s.SendImage(ctx, &SendImageRequest{
+		InstanceID: data.InstanceID,
+		MediaBytes: pngBytes,
+		Caption:    data.Caption,
+		RemoteJID:  data.RemoteJID,
+		Mimetype:   "image/png",
+	})
 }
 
 type SendReactionRequest struct {

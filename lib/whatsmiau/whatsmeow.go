@@ -39,6 +39,7 @@ type Whatsmiau struct {
 	lockConnection   *xsync.Map[string, *sync.Mutex]
 	emitter          chan emitter
 	httpClient       *http.Client
+	mediaHTTPClient  *http.Client // longer timeout for document/image downloads (e.g. large PDFs)
 	fileStorage      interfaces.Storage
 	handlerSemaphore chan struct{}
 	// chatKeyCache: key "instanceID:lid" -> ChatKeyCache, so we can resolve LID to remoteJid when an event has no remoteJid.
@@ -143,6 +144,9 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 		emitter:         make(chan emitter, env.Env.EmitterBufferSize),
 		httpClient: &http.Client{
 			Timeout: time.Second * 30, // TODO: load from env
+		},
+		mediaHTTPClient: &http.Client{
+			Timeout: time.Minute * 5, // large PDFs/images need more time to download
 		},
 		fileStorage:      storage,
 		handlerSemaphore: make(chan struct{}, env.Env.HandlerSemaphoreSize),

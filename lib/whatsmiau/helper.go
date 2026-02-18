@@ -54,6 +54,50 @@ func (s *Whatsmiau) getCtx(ctx context.Context, url string) (*http.Response, err
 	return res, nil
 }
 
+// mediaDownloadUserAgent is sent when downloading documents/images so servers
+// return the raw file instead of an HTML landing page.
+const mediaDownloadUserAgent = "Whatsmiau-MediaDownload/1.0"
+
+// getMediaBytes downloads the resource at url and returns the raw body bytes.
+// It uses a client with longer timeout (5 min) and a download User-Agent so
+// large PDFs complete and servers don't return HTML. It closes the response
+// body and returns an error if the status is not 2xx.
+func (s *Whatsmiau) getMediaBytes(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", mediaDownloadUserAgent)
+
+	res, err := s.mediaHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("media URL returned status %d", res.StatusCode)
+	}
+
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading media: %w", err)
+	}
+	// Debug: confirm we got binary content (e.g. PDF starts with %PDF = 25 50 44 46)
+	headLen := 8
+	if len(data) < headLen {
+		headLen = len(data)
+	}
+	if headLen > 0 {
+		hexHead := fmt.Sprintf("% x", data[:headLen])
+		zap.L().Debug("media download",
+			zap.Int("status", res.StatusCode),
+			zap.Int("body_bytes", len(data)),
+			zap.String("first_bytes_hex", hexHead))
+	}
+	return data, nil
+}
+
 // Returns audioConverted, waveform, duration and an error
 func convertAudio(data []byte, bars int) ([]byte, []byte, float64, error) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
@@ -249,6 +293,56 @@ func extractExtFromFile(fileName, mimeType string, file *os.File) string {
 	}
 
 	return strings.TrimPrefix(ext, ".")
+}
+
+// pdfToPNGScale is viewport scale for PDF→PNG (1.0 ≈ 72 DPI, 2.5 ≈ 180 DPI, 3.0 ≈ 216 DPI).
+const pdfToPNGScale = 2.5
+
+// convertPDFBytesToPNG converts the first page of a PDF (given as bytes) to PNG at 2.5 scale.
+// Requires pdftoppm (poppler-utils).
+func convertPDFBytesToPNG(pdfBytes []byte) ([]byte, error) {
+	tmp, err := os.CreateTemp("", "pdf-*.pdf")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(pdfBytes); err != nil {
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	return convertPDFToPNG(tmp.Name())
+}
+
+// convertPDFToPNG converts the first page of the PDF at pdfPath to PNG at 2.5 scale.
+// Requires pdftoppm (poppler-utils).
+func convertPDFToPNG(pdfPath string) ([]byte, error) {
+	if _, err := exec.LookPath("pdftoppm"); err != nil {
+		return nil, fmt.Errorf("pdftoppm not found (install poppler-utils): %w", err)
+	}
+	outDir := filepath.Dir(pdfPath)
+	base := "pdf2png"
+	cmd := exec.Command("pdftoppm",
+		"-png",
+		"-r", strconv.Itoa(int(72*pdfToPNGScale)),
+		"-f", "1",
+		"-l", "1",
+		pdfPath,
+		filepath.Join(outDir, base),
+	)
+	cmd.Dir = outDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("pdftoppm failed: %w (output: %s)", err, string(out))
+	}
+	// pdftoppm produces base-1.png
+	pngPath := filepath.Join(outDir, base+"-1.png")
+	data, err := os.ReadFile(pngPath)
+	_ = os.Remove(pngPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading pdftoppm output: %w", err)
+	}
+	return data, nil
 }
 
 func canIgnoreMessage(msg *events.Message) bool {
