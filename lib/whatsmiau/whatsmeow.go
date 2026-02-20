@@ -342,8 +342,12 @@ func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string) {
 	}
 }
 
+// qrPollTimeout: max time to wait for first QR in this request. If no QR by then, return ( "", nil ) so the API
+// responds 200 "waiting for QR" and the client can poll again; observeConnection keeps running in the background.
+const qrPollTimeout = 15 * time.Second
+
 func (s *Whatsmiau) observeAndQrCode(ctx context.Context, id string, client *whatsmeow.Client) (string, error) {
-	ctx, c := context.WithTimeout(ctx, 15*time.Second)
+	ctx, c := context.WithTimeout(ctx, qrPollTimeout)
 	defer c()
 
 	zap.L().Debug("starting observe and qr code", zap.String("id", id))
@@ -366,8 +370,9 @@ func (s *Whatsmiau) observeAndQrCode(ctx context.Context, id string, client *wha
 				return qrCode, nil
 			}
 		case <-ctx.Done():
-			zap.L().Debug("observe and qr code context done", zap.String("id", id), zap.Error(ctx.Err()))
-			return "", ctx.Err()
+			// Timeout or cancel: no QR yet. Return no error so API responds 200 "waiting for QR"; client will retry.
+			zap.L().Debug("no QR yet within window, responding without QR for client to retry", zap.String("id", id))
+			return "", nil
 		}
 	}
 }

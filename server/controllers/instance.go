@@ -223,26 +223,36 @@ func (s *Instance) Connect(ctx echo.Context) error {
 		})
 	}
 
-	// Instance already connected: get fresh data (RemoteJID was set by observer on QR success)
-	connectedInstances, err := s.repo.List(c, request.ID)
+	// No QR in this response: either already connected or still waiting (client will poll again)
+	status, err := s.whatsmiau.Status(request.ID)
 	if err != nil {
-		zap.L().Error("failed to list instance after connect", zap.Error(err))
-		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to list instance")
+		zap.L().Error("failed to get status after connect", zap.Error(err))
+		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to get status")
 	}
-	phoneNumber := ""
-	if len(connectedInstances) > 0 && connectedInstances[0].RemoteJID != "" {
-		// JID can be "5493512275498:37@s.whatsapp.net" (suffix :NN is LID); return only the clean number
-		beforeAt := strings.Split(connectedInstances[0].RemoteJID, "@")[0]
-		if idx := strings.Index(beforeAt, ":"); idx != -1 {
-			phoneNumber = beforeAt[:idx]
-		} else {
-			phoneNumber = beforeAt
+	if status == whatsmiau.Connected {
+		connectedInstances, err := s.repo.List(c, request.ID)
+		if err != nil {
+			zap.L().Error("failed to list instance after connect", zap.Error(err))
+			return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to list instance")
 		}
+		phoneNumber := ""
+		if len(connectedInstances) > 0 && connectedInstances[0].RemoteJID != "" {
+			beforeAt := strings.Split(connectedInstances[0].RemoteJID, "@")[0]
+			if idx := strings.Index(beforeAt, ":"); idx != -1 {
+				phoneNumber = beforeAt[:idx]
+			} else {
+				phoneNumber = beforeAt
+			}
+		}
+		return ctx.JSON(http.StatusOK, dto.ConnectInstanceResponse{
+			Message:     "instance already connected",
+			Connected:   true,
+			PhoneNumber: phoneNumber,
+		})
 	}
 	return ctx.JSON(http.StatusOK, dto.ConnectInstanceResponse{
-		Message:     "instance already connected",
-		Connected:   true,
-		PhoneNumber: phoneNumber,
+		Message:   "waiting for QR",
+		Connected: false,
 	})
 }
 
