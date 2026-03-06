@@ -11,7 +11,7 @@ export AWS_PROFILE
 ENV_FILE="$REPO_ROOT/.env.$AWS_PROFILE"
 [ ! -f "$ENV_FILE" ] && ENV_FILE="$REPO_ROOT/.env.production"
 [ -f "$ENV_FILE" ] && set -a && source "$ENV_FILE" && set +a
-STACK_NAME="${STACK_NAME:-whatsmiau}"
+STACK_NAME="${STACK_NAME_OVERRIDE:-${STACK_NAME:-whatsmiau}}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 
 # Try ALBDNSName; if the stack is old and doesn't have it, use host from APIEndpoint

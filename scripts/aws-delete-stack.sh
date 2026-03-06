@@ -10,7 +10,7 @@ export AWS_PROFILE
 ENV_FILE="$REPO_ROOT/.env.$AWS_PROFILE"
 [ ! -f "$ENV_FILE" ] && ENV_FILE="$REPO_ROOT/.env.production"
 [ -f "$ENV_FILE" ] && set -a && source "$ENV_FILE" && set +a
-STACK_NAME="${STACK_NAME:-whatsmiau}"
+STACK_NAME="${STACK_NAME_OVERRIDE:-${STACK_NAME:-whatsmiau}}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 [ -n "$AWS_PROFILE" ] && echo "Using AWS profile: $AWS_PROFILE"
 

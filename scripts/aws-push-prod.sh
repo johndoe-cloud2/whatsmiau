@@ -34,7 +34,7 @@ for AWS_PROFILE in $PROFILES; do
   set -a
   source "$REPO_ROOT/.env.$AWS_PROFILE"
   set +a
-  STACK_NAME="${STACK_NAME:-whatsmiau}"
+  STACK_NAME="${STACK_NAME_OVERRIDE:-${STACK_NAME:-whatsmiau}}"
   AWS_REGION="${AWS_REGION:-us-east-1}"
   ECR_REPO_BACKEND="${ECR_REPO_BACKEND:-whatsmiau}"
   ECR_REPO_ROUTER="${ECR_REPO_ROUTER:-whatsmiau-router}"

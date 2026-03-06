@@ -6,7 +6,7 @@ This describes the minimal AWS setup: one public API (Router) that validates the
 
 - **Router**: Validates header `apikey`, looks up Redis (`route:<instance_id>` or `backends` set), proxies HTTP to the right backend.
 - **Redis**: Stores `route:<instance_id>` → backend URL and set `backends` (each backend registers on startup).
-- **Backends**: Whatsmiau API; SQLite in `/app/data`; `WEBHOOK_URL` for all events; on session loss, instance and route are removed and `session.lost` is sent to the webhook.
+- **Backends**: Whatsmiau API; shared PostgreSQL (RDS) for all tasks; `WEBHOOK_URL` for all events; on session loss, instance and route are removed and `session.lost` is sent to the webhook.
 
 ## Perfiles: ases y foxy
 
@@ -43,8 +43,18 @@ cp .env.foxy.example .env.foxy
 | `REDIS_URL` | Same Redis as router |
 | `API_KEY` | Same key as router |
 | `WEBHOOK_URL` | URL where all WhatsApp events are sent |
-| `DIALECT_DB` | `sqlite3` |
-| `DB_URL` | `file:/app/data/data.db?_foreign_keys=on` |
+| `DIALECT_DB` | `postgres` |
+| `DB_URL` | `postgres://<user>:<pass>@<db-endpoint>:5432/<db>?sslmode=disable` |
+
+### Infra-only vars (scripts/aws-infra.<profile>.env)
+
+| Variable | Description |
+|----------|-------------|
+| `DB_MIN_ACU` | Aurora Serverless v2 minimum ACU (e.g. `0.5`) |
+| `DB_MAX_ACU` | Aurora Serverless v2 maximum ACU (e.g. `4`) |
+| `DB_NAME` | Database name |
+| `DB_USERNAME` | Master username |
+| `DB_PASSWORD` | Master password (required) |
 
 ## Deploy steps (scripts + Makefile)
 
@@ -70,6 +80,8 @@ make push-prod
 ```
 
 Requiere que existan `.env.ases` y `.env.foxy`. Para desplegar solo en un perfil puedes usar `AWS_PUSH_PROFILES=ases ./scripts/aws-push-prod.sh` (o solo `foxy`).
+
+Importante: antes de `infra-create`, crea `scripts/aws-infra.ases.env` y/o `scripts/aws-infra.foxy.env` a partir de los ejemplos y define `DB_PASSWORD`.
 
 ### 3. Update infrastructure (template o parámetros)
 

@@ -23,7 +23,7 @@ ENV_FILE="$REPO_ROOT/.env.$AWS_PROFILE"
 [ ! -f "$ENV_FILE" ] && ENV_FILE="$REPO_ROOT/.env.production"
 [ -f "$ENV_FILE" ] && set -a && source "$ENV_FILE" && set +a
 [ -f "$SCRIPT_DIR/aws-infra.$AWS_PROFILE.env" ] && set -a && source "$SCRIPT_DIR/aws-infra.$AWS_PROFILE.env" && set +a
-STACK_NAME="${STACK_NAME:-whatsmiau}"
+STACK_NAME="${STACK_NAME_OVERRIDE:-${STACK_NAME:-whatsmiau}}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ECR_REPO_BACKEND="${ECR_REPO_BACKEND:-whatsmiau}"
 ECR_REPO_ROUTER="${ECR_REPO_ROUTER:-whatsmiau-router}"
@@ -99,13 +99,24 @@ CF_PARAMS_FILE=$(mktemp)
 trap "rm -f $CF_PARAMS_FILE" EXIT
 CERT_ARN="${CERTIFICATE_ARN:-}"
 [ -z "$CERT_ARN" ] && CERT_ARN=""
+DB_MIN_ACU="${DB_MIN_ACU:-0.5}"
+DB_MAX_ACU="${DB_MAX_ACU:-4}"
+DB_NAME="${DB_NAME:-whatsmiau}"
+DB_USERNAME="${DB_USERNAME:-whatsmiau}"
+DB_PASSWORD="${DB_PASSWORD:-}"
+[ -n "$DB_PASSWORD" ] || { echo "Error: Set DB_PASSWORD in scripts/aws-infra.$AWS_PROFILE.env (or env)"; exit 1; }
 cat <<EOF > "$CF_PARAMS_FILE"
 [
   {"ParameterKey":"ApiKey","ParameterValue":"$(echo "$API_KEY" | sed 's/"/\\"/g')"},
   {"ParameterKey":"WebhookURL","ParameterValue":"$(echo "$WEBHOOK_URL" | sed 's/"/\\"/g')"},
   {"ParameterKey":"BackendImage","ParameterValue":"$BACKEND_IMAGE"},
   {"ParameterKey":"RouterImage","ParameterValue":"$ROUTER_IMAGE"},
-  {"ParameterKey":"CertificateArn","ParameterValue":"$(echo "$CERT_ARN" | sed 's/"/\\"/g')"}
+  {"ParameterKey":"CertificateArn","ParameterValue":"$(echo "$CERT_ARN" | sed 's/"/\\"/g')"},
+  {"ParameterKey":"DatabaseMinACU","ParameterValue":"$DB_MIN_ACU"},
+  {"ParameterKey":"DatabaseMaxACU","ParameterValue":"$DB_MAX_ACU"},
+  {"ParameterKey":"DatabaseName","ParameterValue":"$DB_NAME"},
+  {"ParameterKey":"DatabaseUsername","ParameterValue":"$DB_USERNAME"},
+  {"ParameterKey":"DatabasePassword","ParameterValue":"$(echo "$DB_PASSWORD" | sed 's/"/\\"/g')"}
 ]
 EOF
 
