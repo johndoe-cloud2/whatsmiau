@@ -44,9 +44,15 @@ Parameters:
     NoEcho: true
     MinLength: 8
     Description: PostgreSQL master password (min 8 chars)
+  DatabasePublicAccess:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Set to true to allow public access to PostgreSQL (e.g. DBeaver from your PC). Less secure.
 
 Conditions:
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+  DatabaseIsPublic: !Equals [!Ref DatabasePublicAccess, "true"]
 
 Resources:
   VPC:
@@ -224,7 +230,7 @@ Resources:
       VpcSecurityGroupIds:
         - !Ref RedisSG
 
-  # Aurora PostgreSQL Serverless v2
+  # Aurora PostgreSQL Serverless v2 (always in private subnets; use Bastion + SSM to connect when DatabasePublicAccess=true)
   DatabaseSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
@@ -257,6 +263,64 @@ Resources:
       Engine: aurora-postgresql
       DBInstanceClass: db.serverless
       PubliclyAccessible: false
+
+  # Bastion for DB access via SSM port-forward (when DatabasePublicAccess=true)
+  BastionSG:
+    Type: AWS::EC2::SecurityGroup
+    Condition: DatabaseIsPublic
+    Properties:
+      GroupDescription: Bastion for SSM port-forward to DB
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref DatabaseSG
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+  DatabaseSGFromBastion:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: DatabaseIsPublic
+    Properties:
+      GroupId: !Ref DatabaseSG
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref BastionSG
+  BastionRole:
+    Type: AWS::IAM::Role
+    Condition: DatabaseIsPublic
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  BastionProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: DatabaseIsPublic
+    Properties:
+      Roles: [!Ref BastionRole]
+  Bastion:
+    Type: AWS::EC2::Instance
+    Condition: DatabaseIsPublic
+    DependsOn: AppDatabaseWriter
+    Properties:
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      InstanceType: t3.micro
+      IamInstanceProfile: !Ref BastionProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: "0"
+          GroupSet: [!Ref BastionSG]
+          SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-db-bastion
 
   # ECS
   Cluster:
@@ -360,7 +424,7 @@ Resources:
               Value: postgres
             - Name: DB_URL
               Value: !Sub
-                - "postgres://${DBUser}:${DBPass}@${DBHost}:5432/${DBName}?sslmode=disable"
+                - "postgres://${DBUser}:${DBPass}@${DBHost}:5432/${DBName}?sslmode=require"
                 - DBUser: !Ref DatabaseUsername
                   DBPass: !Ref DatabasePassword
                   DBHost: !GetAtt AppDatabase.Endpoint.Address
@@ -531,3 +595,9 @@ Outputs:
     Value: !GetAtt AppDatabase.Endpoint.Address
     Export:
       Name: !Sub ${AWS::StackName}-DatabaseEndpoint
+  BastionInstanceId:
+    Condition: DatabaseIsPublic
+    Description: Bastion instance ID for SSM port-forward to DB (see docs)
+    Value: !Ref Bastion
+    Export:
+      Name: !Sub ${AWS::StackName}-BastionInstanceId

@@ -105,6 +105,7 @@ DB_NAME="${DB_NAME:-whatsmiau}"
 DB_USERNAME="${DB_USERNAME:-whatsmiau}"
 DB_PASSWORD="${DB_PASSWORD:-}"
 [ -n "$DB_PASSWORD" ] || { echo "Error: Set DB_PASSWORD in scripts/aws-infra.$AWS_PROFILE.env (or env)"; exit 1; }
+DB_PUBLIC_ACCESS="${DB_PUBLIC_ACCESS:-false}"
 cat <<EOF > "$CF_PARAMS_FILE"
 [
   {"ParameterKey":"ApiKey","ParameterValue":"$(echo "$API_KEY" | sed 's/"/\\"/g')"},
@@ -116,7 +117,8 @@ cat <<EOF > "$CF_PARAMS_FILE"
   {"ParameterKey":"DatabaseMaxACU","ParameterValue":"$DB_MAX_ACU"},
   {"ParameterKey":"DatabaseName","ParameterValue":"$DB_NAME"},
   {"ParameterKey":"DatabaseUsername","ParameterValue":"$DB_USERNAME"},
-  {"ParameterKey":"DatabasePassword","ParameterValue":"$(echo "$DB_PASSWORD" | sed 's/"/\\"/g')"}
+  {"ParameterKey":"DatabasePassword","ParameterValue":"$(echo "$DB_PASSWORD" | sed 's/"/\\"/g')"},
+  {"ParameterKey":"DatabasePublicAccess","ParameterValue":"$DB_PUBLIC_ACCESS"}
 ]
 EOF
 

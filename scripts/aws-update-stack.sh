@@ -43,6 +43,7 @@ if [ -z "$API_KEY" ] || [ -z "$WEBHOOK_URL" ]; then
   [ -z "$DB_MAX_ACU" ] && DB_MAX_ACU=$(echo "$MAP" | awk '$1=="DatabaseMaxACU"{print $2}')
   [ -z "$DB_NAME" ] && DB_NAME=$(echo "$MAP" | awk '$1=="DatabaseName"{print $2}')
   [ -z "$DB_USERNAME" ] && DB_USERNAME=$(echo "$MAP" | awk '$1=="DatabaseUsername"{print $2}')
+  [ -z "$DB_PUBLIC_ACCESS" ] && DB_PUBLIC_ACCESS=$(echo "$MAP" | awk '$1=="DatabasePublicAccess"{print $2}')
 fi
 API_KEY="${API_KEY:-placeholder}"
 WEBHOOK_URL="${WEBHOOK_URL:-https://example.com/webhook}"
@@ -52,6 +53,7 @@ DB_MIN_ACU="${DB_MIN_ACU:-0.5}"
 DB_MAX_ACU="${DB_MAX_ACU:-4}"
 DB_NAME="${DB_NAME:-whatsmiau}"
 DB_USERNAME="${DB_USERNAME:-whatsmiau}"
+DB_PUBLIC_ACCESS="${DB_PUBLIC_ACCESS:-false}"
 
 if [ -n "$DB_PASSWORD" ]; then
   DB_PASSWORD_PARAM="{\"ParameterKey\":\"DatabasePassword\",\"ParameterValue\":\"$(echo "$DB_PASSWORD" | sed 's/"/\\"/g')\"}"
@@ -72,6 +74,7 @@ cat <<EOF > "$CF_PARAMS_FILE"
   {"ParameterKey":"DatabaseMaxACU","ParameterValue":"$DB_MAX_ACU"},
   {"ParameterKey":"DatabaseName","ParameterValue":"$DB_NAME"},
   {"ParameterKey":"DatabaseUsername","ParameterValue":"$DB_USERNAME"},
+  {"ParameterKey":"DatabasePublicAccess","ParameterValue":"$DB_PUBLIC_ACCESS"},
   $DB_PASSWORD_PARAM
 ]
 EOF
