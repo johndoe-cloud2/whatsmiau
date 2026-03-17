@@ -31,6 +31,18 @@ import (
 // This should be impossible, as the database schema contains CHECK()s for all the relevant columns.
 var ErrInvalidLength = errors.New("database returned byte array with illegal length")
 
+// ErrDeviceDeleted is returned when an operation fails because the device was already deleted (e.g. during logout).
+var ErrDeviceDeleted = errors.New("device was deleted, cannot generate prekeys")
+
+// isForeignKeyViolation returns true if err is a PostgreSQL foreign key constraint violation (23503).
+// This can happen when app state or prekeys are written after the device was deleted (e.g. during logout race).
+func isForeignKeyViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "violates foreign key constraint")
+}
+
 // PostgresArrayWrapper is a function to wrap array values before passing them to the sql package.
 //
 // When using github.com/lib/pq, you should set
@@ -317,6 +329,9 @@ const (
 func (s *SQLStore) genOnePreKey(ctx context.Context, id uint32, markUploaded bool) (*keys.PreKey, error) {
 	key := keys.NewPreKey(id)
 	_, err := s.db.Exec(ctx, insertPreKeyQuery, s.JID, key.KeyID, key.Priv[:], markUploaded)
+	if err != nil && isForeignKeyViolation(err) {
+		return nil, ErrDeviceDeleted
+	}
 	return key, err
 }
 
@@ -448,6 +463,9 @@ const (
 
 func (s *SQLStore) PutAppStateSyncKey(ctx context.Context, id []byte, key store.AppStateSyncKey) error {
 	_, err := s.db.Exec(ctx, putAppStateSyncKeyQuery, s.JID, id, key.Data, key.Timestamp, key.Fingerprint)
+	if err != nil && isForeignKeyViolation(err) {
+		return nil
+	}
 	return err
 }
 
@@ -484,6 +502,10 @@ const (
 
 func (s *SQLStore) PutAppStateVersion(ctx context.Context, name string, version uint64, hash [128]byte) error {
 	_, err := s.db.Exec(ctx, putAppStateVersionQuery, s.JID, name, version, hash[:])
+	if err != nil && isForeignKeyViolation(err) {
+		// Device was already deleted (e.g. during logout), skip app state write
+		return nil
+	}
 	return err
 }
 
@@ -527,6 +549,10 @@ func (s *SQLStore) putAppStateMutationMACs(ctx context.Context, name string, ver
 		queryParts[i] = fmt.Sprintf(placeholderSyntax, baseIndex+1, baseIndex+2)
 	}
 	_, err := s.db.Exec(ctx, putAppStateMutationMACsQuery+strings.Join(queryParts, ","), values...)
+	if err != nil && isForeignKeyViolation(err) {
+		// Device or app state version was already deleted (e.g. during logout), skip
+		return nil
+	}
 	return err
 }
 

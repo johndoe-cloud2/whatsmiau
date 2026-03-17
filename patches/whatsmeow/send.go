@@ -510,7 +510,7 @@ func (cli *Client) BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2
 // BuildReaction builds a message reaction message using the given variables.
 // The built message can be sent normally using Client.SendMessage.
 //
-//	resp, err := cli.SendMessage(context.Background(), chat, cli.BuildReaction(chat, senderJID, targetMessageID, "🐈️")
+//	resp, err := cli.SendMessage(context.Background(), chat, cli.BuildReaction(chat, senderJID, targetMessageID, "reaction"))
 //
 // Note that for newsletter messages, you need to use NewsletterSendReaction instead of BuildReaction + SendMessage.
 func (cli *Client) BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message {

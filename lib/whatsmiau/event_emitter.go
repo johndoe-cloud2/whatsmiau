@@ -164,6 +164,14 @@ type sessionEventPayload struct {
 	Event       Wook      `json:"event"`
 }
 
+// connectionUpdatePayload is the payload for connection.update webhook when device connects.
+type connectionUpdatePayload struct {
+	Instance string    `json:"instance"`
+	State    string    `json:"state"`
+	DateTime time.Time `json:"date_time"`
+	Event    Wook      `json:"event"`
+}
+
 // getWebhookURL returns WEBHOOK_URL from env if set (ECS mode), else the instance's webhook URL.
 func getWebhookURL(instance *models.Instance) string {
 	if env.Env.WebhookURL != "" {
@@ -318,9 +326,21 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 		go func() {
 			defer func() { <-s.handlerSemaphore }()
 			instance := s.getInstanceCached(id)
+			// Connected can emit with nil instance when WEBHOOK_URL env is set (prod): avoids
+			// "no instance found" when Redis/instance lookup fails due to timing or multi-backend.
 			if instance == nil {
-				zap.L().Warn("no instance found for event", zap.String("instance", id))
-				return
+				switch evt.(type) {
+				case *events.Connected:
+					if env.Env.WebhookURL != "" {
+						s.handleConnected(id, nil)
+					} else {
+						zap.L().Warn("no instance found for event", zap.String("instance", id))
+					}
+					return
+				default:
+					zap.L().Warn("no instance found for event", zap.String("instance", id))
+					return
+				}
 			}
 
 			eventMap := make(map[string]bool)
@@ -329,6 +349,8 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 			}
 
 			switch e := evt.(type) {
+			case *events.Connected:
+				s.handleConnected(id, instance)
 			case *events.LoggedOut:
 				s.handleLoggedOut(id)
 			case *events.Disconnected:
@@ -348,6 +370,25 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 			}
 		}()
 	}
+}
+
+func (s *Whatsmiau) handleConnected(id string, instance *models.Instance) {
+	if !shouldEmitEvent(instance, "connection.update") && !shouldEmitEvent(instance, "CONNECTION_UPDATE") {
+		return
+	}
+	url := getWebhookURL(instance)
+	if url == "" {
+		zap.L().Debug("skipping connection.update emit: no webhook URL", zap.String("instance", id))
+		return
+	}
+	payload := &connectionUpdatePayload{
+		Instance: id,
+		State:    Connected,
+		DateTime: time.Now(),
+		Event:    WookConnectionUpdate,
+	}
+	zap.L().Info("emitting connection.update to webhook", zap.String("instance", id), zap.String("state", Connected))
+	s.emitForInstance(id, payload, url)
 }
 
 func (s *Whatsmiau) handleLoggedOut(id string) {
@@ -403,6 +444,9 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 	if !shouldEmitEvent(instance, "MESSAGES_UPSERT") {
 		return
 	}
+	if e.Info.IsFromMe {
+		return
+	}
 	// Never emit message events from groups or channels.
 	if isGroupOrChannelJID(e.Info.Chat.String()) {
 		return
@@ -449,7 +493,12 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 	} else {
 		zap.L().Debug("message event", zap.String("instance", id), zap.Any("payload", payload))
 	}
-	s.emitForInstance(instance.ID, payload, getWebhookURL(instance))
+	webhookURL := getWebhookURL(instance)
+	if webhookURL == "" {
+		zap.L().Warn("skipping message emit: no webhook URL", zap.String("instance", id), zap.Bool("env_webhook_set", env.Env.WebhookURL != ""))
+		return
+	}
+	s.emitForInstance(instance.ID, payload, webhookURL)
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	s.markMessageEmitted(ctx2, instance.ID, msgKey)

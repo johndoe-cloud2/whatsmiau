@@ -203,6 +203,14 @@ func (s *Instance) Connect(ctx echo.Context) error {
 				}
 			}
 		}
+	} else if env.Env.BackendPublicURL != "" {
+		// Instance already exists (e.g. Create ran on another backend). Ensure route points to THIS backend,
+		// which will have the client after Connect (multi-backend prod fix).
+		if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
+			if err := redisRepo.SetRoute(c, request.ID, env.Env.BackendPublicURL); err != nil {
+				zap.L().Warn("failed to set route in Redis on connect", zap.Error(err), zap.String("instance", request.ID))
+			}
+		}
 	}
 
 	qrCode, err := s.whatsmiau.Connect(c, request.ID)
@@ -229,7 +237,8 @@ func (s *Instance) Connect(ctx echo.Context) error {
 		zap.L().Error("failed to get status after connect", zap.Error(err))
 		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to get status")
 	}
-	if status == whatsmiau.Connected {
+	// Connected or Connecting (post-scan 515 reconnect): user scanned successfully, stop polling
+	if status == whatsmiau.Connected || status == whatsmiau.Connecting {
 		connectedInstances, err := s.repo.List(c, request.ID)
 		if err != nil {
 			zap.L().Error("failed to list instance after connect", zap.Error(err))
@@ -289,6 +298,12 @@ func (s *Instance) ConnectQRBuffer(ctx echo.Context) error {
 				if err := redisRepo.SetRoute(c, newInstance.ID, env.Env.BackendPublicURL); err != nil {
 					zap.L().Warn("failed to set route in Redis", zap.Error(err), zap.String("instance", newInstance.ID))
 				}
+			}
+		}
+	} else if env.Env.BackendPublicURL != "" {
+		if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
+			if err := redisRepo.SetRoute(c, request.ID, env.Env.BackendPublicURL); err != nil {
+				zap.L().Warn("failed to set route in Redis on connect QR buffer", zap.Error(err), zap.String("instance", request.ID))
 			}
 		}
 	}

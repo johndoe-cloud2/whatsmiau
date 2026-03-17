@@ -157,7 +157,7 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 	go instance.runStaleInstancesCleanup()
 
 	clients.Range(func(id string, client *whatsmeow.Client) bool {
-		zap.L().Info("stating event handler", zap.String("jid", client.Store.ID.String()))
+		zap.L().Info("starting event handler", zap.String("jid", client.Store.ID.String()))
 		client.AddEventHandler(instance.Handle(id))
 		return true
 	})

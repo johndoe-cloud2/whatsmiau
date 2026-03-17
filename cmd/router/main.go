@@ -142,6 +142,8 @@ func (h *routerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			backendURL = urls[0]
 			zap.L().Info("no route for instance, using fallback backend", zap.String("instance", instanceID), zap.String("backend", backendURL))
+			// Stick instance to this backend so subsequent requests (e.g. Connect polls) hit the same backend.
+			_ = h.redis.Set(ctx, redisKeyRoutePrefix+instanceID, backendURL, 0).Err()
 		}
 	}
 	if backendURL == "" {
@@ -233,6 +235,9 @@ func (h *routerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Host = target.Host
 	}
 
+	if instanceID != "" {
+		zap.L().Debug("routing instance to backend", zap.String("instance", instanceID), zap.String("backend", backendURL))
+	}
 	h.proxy.ServeHTTP(w, r)
 }
 
@@ -246,6 +251,10 @@ func extractInstanceID(path string) string {
 	}
 	switch parts[1] {
 	case "instance":
+		if len(parts) >= 4 && (parts[2] == "connect" || parts[2] == "connectionState" || parts[2] == "logout" || parts[2] == "delete" || parts[2] == "update") {
+			// Evolution: /v1/instance/connect/:id, /v1/instance/connectionState/:id, etc.
+			return parts[3]
+		}
 		if len(parts) >= 3 {
 			return parts[2]
 		}

@@ -23,6 +23,8 @@ help:
 	@echo "  make push-prod    - build once, push and ECS deploy to ases and foxy (.env.ases + .env.foxy)"
 	@echo "  make domain-info  - show ALB DNS for CNAME in IONOS (use PROFILE=ases or foxy)"
 	@echo "  make logs-fetch HOURS=N - fetch CloudWatch logs from ases and foxy for the last N hours"
+	@echo "  make logs-api-prod [HOURS=N] - fetch logs from API prod (api.asesadmin.com) that receives webhooks"
+	@echo "  make logs-webhook [HOURS=N] - fetch logs from BOTH: WhatsMiau (sends) + API prod (receives)"
 	@echo "  make api-test [PROFILE=ases] - test deployed API (health, list, create) to check 503/502/504"
 
 # API on 8081 so 8080 is free for webhook URL locally. Uses .env and streams all logs to the terminal.
@@ -68,6 +70,15 @@ domain-info:
 logs-fetch:
 	@[ -n "$(HOURS)" ] || (echo "Usage: make logs-fetch HOURS=2  (or 24, etc.)" && exit 1)
 	./scripts/aws-logs-fetch.sh "$(HOURS)"
+
+# Logs de la API de prod (api.asesadmin.com) que recibe webhooks. Profile ases.
+# Para ver si llegan los POST de WhatsMiau: make logs-api-prod  o  make logs-api-prod HOURS=2
+logs-api-prod:
+	./scripts/aws-logs-api-prod.sh $(if $(HOURS),$(HOURS),1)
+
+# Logs de AMBOS: WhatsMiau (envía webhooks) + API prod (recibe). Debug completo del flujo.
+logs-webhook:
+	./scripts/aws-logs-webhook-full.sh $(if $(HOURS),$(HOURS),2)
 
 # Test the deployed API (not local). See scripts/aws-api-test.sh. After running, make logs-fetch HOURS=1 to see backends_count.
 api-test:
