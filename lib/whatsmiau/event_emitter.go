@@ -63,7 +63,7 @@ func (s *Whatsmiau) getInstanceCached(id string) *models.Instance {
 	}
 
 	if len(res) == 0 {
-		zap.L().Warn("no instanceCached found by instance", zap.String("instance", id))
+		zap.L().Debug("no instance in Redis for id (expected after delete/logout)", zap.String("instance", id))
 		return nil
 	}
 
@@ -155,6 +155,7 @@ func (s *Whatsmiau) doEmit(data []byte, url string) (bool, bool) {
 	}()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		zap.L().Debug("webhook POST ok", zap.String("url", url), zap.Int("status", resp.StatusCode))
 		return true, false
 	}
 
@@ -397,6 +398,12 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 		go func() {
 			defer func() { <-s.handlerSemaphore }()
 			instance := s.getInstanceCached(id)
+			// LoggedOut: still teardown client/DB even if Redis row was already removed (401 cascade).
+			if _, ok := evt.(*events.LoggedOut); ok {
+				s.handleLoggedOut(id)
+				return
+			}
+
 			// Connected can emit with nil instance when WEBHOOK_URL env is set (prod): avoids
 			// "no instance found" when Redis/instance lookup fails due to timing or multi-backend.
 			if instance == nil {
@@ -408,20 +415,21 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 						zap.L().Warn("no instance found for event", zap.String("instance", id))
 					}
 					return
+				case *events.Disconnected, *events.ConnectFailure:
+					// Normal after TeardownInstance removed Redis while the socket still drains.
+					zap.L().Debug("ignoring connection event: instance no longer in store", zap.String("instance", id), zap.String("type", fmt.Sprintf("%T", evt)))
+					return
 				default:
-					zap.L().Warn("no instance found for event", zap.String("instance", id))
+					zap.L().Debug("no instance for event", zap.String("instance", id), zap.String("type", fmt.Sprintf("%T", evt)))
 					return
 				}
 			}
 
-			// Handle lifecycle events regardless of webhook enabled state
-			if _, ok := evt.(*events.LoggedOut); ok {
-				s.handleLoggedOut(id)
-				return
-			}
-
-			if instance.Webhook.Enabled != nil && !*instance.Webhook.Enabled {
-				return
+			// Per-instance webhook toggle only applies when not using global WEBHOOK_URL.
+			if env.Env.WebhookURL == "" {
+				if instance.Webhook.Enabled != nil && !*instance.Webhook.Enabled {
+					return
+				}
 			}
 
 			eventMap := make(map[string]bool)
@@ -484,21 +492,32 @@ func (s *Whatsmiau) TeardownInstance(id string) {
 	ctx := context.Background()
 
 	// Get instance and webhook URL before deleting (so we can notify with instance's webhook if set)
-	instance := s.getInstance(id)
-	webhookURL := getWebhookURL(instance)
+	meta := s.getInstance(id)
+	webhookURL := getWebhookURL(meta)
 
 	client, ok := s.clients.Load(id)
 	if ok {
 		if err := s.deleteDeviceIfExists(ctx, client); err != nil {
-			zap.L().Error("failed to delete device for instance", zap.String("instance", id), zap.Error(err))
-			return
+			zap.L().Error("failed to delete device for instance (continuing Redis/route cleanup)", zap.String("instance", id), zap.Error(err))
+		}
+	} else if meta != nil && meta.RemoteJID != "" {
+		// Client not in memory (other task / restart): still remove session rows from the local DB.
+		if jid, err := types.ParseJID(meta.RemoteJID); err == nil {
+			if dev, err := s.container.GetDevice(ctx, jid); err == nil && dev != nil {
+				if err := s.container.DeleteDevice(ctx, dev); err != nil {
+					zap.L().Warn("failed to delete device from store", zap.String("instance", id), zap.Error(err))
+				}
+			}
 		}
 	}
 
 	s.clients.Delete(id)
+	s.observerRunning.Delete(id)
+	s.lockConnection.Delete(id)
 	s.qrCache.Delete(id)
 	s.pairingCache.Delete(id)
 	s.ClearChatKeyCache(id)
+	s.instanceCache.Delete(id)
 
 	if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
 		_ = redisRepo.DeleteEmittedMessagesForInstance(ctx, id)
@@ -584,11 +603,18 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 		zap.L().Debug("message event", zap.String("instance", id), zap.Any("data", wookMessage.Data))
 	}
 
-	s.emit(wookMessage, instance.Webhook.Url)
+	url := getWebhookURL(instance)
+	if url == "" {
+		zap.L().Warn("skipping message webhook: no URL (set WEBHOOK_URL env or instance webhook.url)", zap.String("instance", id))
+		return
+	}
+	zap.L().Debug("emitting message to webhook", zap.String("instance", id), zap.String("url", url))
+	s.emitForInstance(instance.ID, wookMessage, url)
 }
 
 func (s *Whatsmiau) handleMessageDeleteEvent(id string, instance *models.Instance, e *events.Message, eventMap map[string]bool) {
-	if !eventMap["MESSAGES_DELETE"] {
+	_ = eventMap
+	if !shouldEmitEvent(instance, "MESSAGES_DELETE") {
 		return
 	}
 
@@ -633,7 +659,11 @@ func (s *Whatsmiau) handleMessageDeleteEvent(id string, instance *models.Instanc
 	}
 
 	zap.L().Debug("message delete event", zap.String("instance", id), zap.Any("data", deleteData))
-	s.emit(wookEvent, instance.Webhook.Url)
+	url := getWebhookURL(instance)
+	if url == "" {
+		return
+	}
+	s.emitForInstance(instance.ID, wookEvent, url)
 }
 
 func (s *Whatsmiau) convertEventReceipt(id string, evt *events.Receipt) []WookMessageUpdateData {
@@ -668,7 +698,8 @@ func (s *Whatsmiau) convertEventReceipt(id string, evt *events.Receipt) []WookMe
 }
 
 func (s *Whatsmiau) handleReceiptEvent(id string, instance *models.Instance, e *events.Receipt, eventMap map[string]bool) {
-	if !eventMap["MESSAGES_UPDATE"] {
+	_ = eventMap
+	if !shouldEmitEvent(instance, "MESSAGES_UPDATE") {
 		return
 	}
 
@@ -681,6 +712,11 @@ func (s *Whatsmiau) handleReceiptEvent(id string, instance *models.Instance, e *
 		return
 	}
 
+	url := getWebhookURL(instance)
+	if url == "" {
+		return
+	}
+
 	for _, event := range data {
 		wookData := &WookEvent[WookMessageUpdateData]{
 			Instance: instance.ID,
@@ -689,7 +725,7 @@ func (s *Whatsmiau) handleReceiptEvent(id string, instance *models.Instance, e *
 			Event:    WookMessagesUpdate,
 		}
 
-		s.emit(wookData, instance.Webhook.Url)
+		s.emitForInstance(instance.ID, wookData, url)
 	}
 }
 
@@ -726,7 +762,8 @@ func (s *Whatsmiau) handlePushNameEvent(id string, instance *models.Instance, e 
 }
 
 func (s *Whatsmiau) handleConnectionUpdateEvent(id string, instance *models.Instance, state string, statusReason int, eventMap map[string]bool) {
-	if !eventMap["CONNECTION_UPDATE"] {
+	_ = eventMap
+	if !shouldEmitEvent(instance, "CONNECTION_UPDATE") && !shouldEmitEvent(instance, "connection.update") {
 		return
 	}
 
@@ -751,13 +788,22 @@ func (s *Whatsmiau) handleConnectionUpdateEvent(id string, instance *models.Inst
 	}
 
 	zap.L().Debug("connection update event", zap.String("instance", id), zap.Any("data", data))
-	s.emit(wookEvent, instance.Webhook.Url)
+	url := getWebhookURL(instance)
+	if url == "" {
+		return
+	}
+	s.emitForInstance(instance.ID, wookEvent, url)
 }
 
 func (s *Whatsmiau) emitConnectionUpdate(id string, state string, statusReason int) {
 	instance := s.getInstanceCached(id)
-	if instance == nil || instance.Webhook.Enabled == nil || !*instance.Webhook.Enabled {
+	if instance == nil {
 		return
+	}
+	if env.Env.WebhookURL == "" {
+		if instance.Webhook.Enabled == nil || !*instance.Webhook.Enabled {
+			return
+		}
 	}
 
 	eventMap := make(map[string]bool)

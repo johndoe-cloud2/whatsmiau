@@ -188,6 +188,10 @@ func (s *Whatsmiau) generateClient(ctx context.Context, id string) (*whatsmeow.C
 	lock.Lock()
 	defer lock.Unlock()
 
+	// Drop in-memory client if it no longer matches Redis (e.g. session deleted server-side but this
+	// process still holds the old logged-in client — next Connect would reuse the previous number).
+	s.reconcileInMemoryClientWithRepo(ctx, id)
+
 	client, ok := s.clients.Load(id)
 	if !ok {
 		device := s.container.NewDevice()
@@ -230,6 +234,68 @@ func (s *Whatsmiau) generateClient(ctx context.Context, id string) (*whatsmeow.C
 	}
 
 	return client, nil
+}
+
+// reconcileInMemoryClientWithRepo removes a cached client whose paired JID disagrees with instance metadata
+// in Redis (or Redis has no RemoteJID while memory still has a device id). Skips while observeConnection
+// is still running for that same client to avoid racing a pairing that has not written RemoteJID yet.
+func (s *Whatsmiau) reconcileInMemoryClientWithRepo(ctx context.Context, id string) {
+	cli, ok := s.clients.Load(id)
+	if !ok || cli == nil || cli.Store == nil || cli.Store.ID == nil {
+		return
+	}
+
+	if obs, obsOK := s.observerRunning.Load(id); obsOK && obs == cli {
+		return
+	}
+
+	memJID := cli.Store.ID.String()
+	list, err := s.repo.List(ctx, id)
+	if err != nil {
+		zap.L().Warn("reconcile client: list instance failed", zap.String("id", id), zap.Error(err))
+		return
+	}
+
+	redisJID := ""
+	if len(list) > 0 {
+		redisJID = strings.TrimSpace(list[0].RemoteJID)
+	}
+
+	needDrop := false
+	switch {
+	case redisJID == "":
+		// Instance not paired in Redis but we still have a device id in RAM → stale after delete/recreate.
+		needDrop = true
+	case !jidsMatchForInstance(memJID, redisJID):
+		needDrop = true
+	}
+	if !needDrop {
+		return
+	}
+
+	zap.L().Warn("dropping stale WhatsApp client: Redis instance metadata does not match in-memory session",
+		zap.String("id", id),
+		zap.String("memory_jid", memJID),
+		zap.String("redis_remote_jid", redisJID),
+	)
+
+	s.clients.Delete(id)
+	s.instanceCache.Delete(id)
+	if err := s.deleteDeviceIfExists(ctx, cli); err != nil {
+		zap.L().Error("reconcile: failed to delete stale device", zap.String("id", id), zap.Error(err))
+	}
+}
+
+func jidsMatchForInstance(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ja, ea := types.ParseJID(a)
+	jb, eb := types.ParseJID(b)
+	if ea != nil || eb != nil {
+		return false
+	}
+	return ja.User == jb.User && ja.Server == jb.Server
 }
 
 func (s *Whatsmiau) hasSomeDevice(client *whatsmeow.Client) bool {
@@ -446,16 +512,28 @@ func (s *Whatsmiau) Logout(ctx context.Context, id string) error {
 // Disconnect tears down the instance completely: device store, Redis, route and webhook.
 // The number is removed as if it had never existed.
 func (s *Whatsmiau) Disconnect(id string) error {
-	client, ok := s.clients.Load(id)
-	if !ok {
-		zap.L().Warn("failed to disconnect (device not loaded)", zap.String("id", id))
-		return nil
-	}
-
-	client.Disconnect()
-	s.qrCache.Delete(id)
-	s.pairingCache.Delete(id)
+	s.TeardownInstance(id)
 	return nil
+}
+
+// PhoneE164 returns the paired WhatsApp phone number (digits) if known: in-memory client first, then Redis RemoteJID.
+func (s *Whatsmiau) PhoneE164(ctx context.Context, id string) string {
+	if client, ok := s.clients.Load(id); ok && client != nil && client.Store != nil && client.Store.ID != nil {
+		return jidToPhoneE164(client.Store.ID.String())
+	}
+	list, err := s.repo.List(ctx, id)
+	if err != nil || len(list) == 0 || list[0].RemoteJID == "" {
+		return ""
+	}
+	return jidToPhoneE164(list[0].RemoteJID)
+}
+
+func jidToPhoneE164(jid string) string {
+	beforeAt := strings.Split(jid, "@")[0]
+	if idx := strings.Index(beforeAt, ":"); idx != -1 {
+		return beforeAt[:idx]
+	}
+	return beforeAt
 }
 
 // runStaleInstancesCleanup runs periodically and removes instances that have not sent any webhook event in STALE_INSTANCE_DAYS.

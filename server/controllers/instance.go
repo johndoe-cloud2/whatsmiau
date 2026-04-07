@@ -5,7 +5,6 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/http"
-	"strings"
 
 	"github.com/verbeux-ai/whatsmiau/env"
 	"github.com/verbeux-ai/whatsmiau/lib/whatsmiau"
@@ -316,20 +315,7 @@ func (s *Instance) Connect(ctx echo.Context) error {
 	}
 	// Connected or Connecting (post-scan 515 reconnect): user scanned successfully, stop polling
 	if status == whatsmiau.Connected || status == whatsmiau.Connecting {
-		connectedInstances, err := s.repo.List(c, request.ID)
-		if err != nil {
-			zap.L().Error("failed to list instance after connect", zap.Error(err))
-			return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to list instance")
-		}
-		phoneNumber := ""
-		if len(connectedInstances) > 0 && connectedInstances[0].RemoteJID != "" {
-			beforeAt := strings.Split(connectedInstances[0].RemoteJID, "@")[0]
-			if idx := strings.Index(beforeAt, ":"); idx != -1 {
-				phoneNumber = beforeAt[:idx]
-			} else {
-				phoneNumber = beforeAt
-			}
-		}
+		phoneNumber := s.whatsmiau.PhoneE164(c, request.ID)
 		return ctx.JSON(http.StatusOK, dto.ConnectInstanceResponse{
 			Message:     "instance already connected",
 			Connected:   true,
