@@ -13,7 +13,8 @@ const (
 	WookMessagesUpdate   Wook = "messages.update"
 	WookContactsUpsert   Wook = "contacts.upsert"
 	WookConnectionUpdate Wook = "connection.update"
-  WookMessagesDelete  Wook = "messages.delete"
+	WookMessagesDelete   Wook = "messages.delete"
+	WookSessionLost      Wook = "session.lost"
 )
 
 type WookEvent[data any] struct {

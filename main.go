@@ -38,6 +38,47 @@ import (
 // @securityDefinitions.apikey ApiKeyAuth
 // @in header
 // @name apikey
+
+// cleanupDeadBackends removes unreachable backend URLs from Redis on startup.
+func cleanupDeadBackends(redisRepo *instances.RedisInstance) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	backends, err := redisRepo.GetAllBackends(ctx)
+	if err != nil {
+		zap.L().Warn("failed to get backends for cleanup", zap.Error(err))
+		return
+	}
+	if len(backends) == 0 {
+		return
+	}
+
+	zap.L().Info("checking backends health on startup", zap.Int("count", len(backends)))
+	client := &http.Client{Timeout: 3 * time.Second}
+	removed := 0
+
+	for _, backendURL := range backends {
+		resp, err := client.Get(backendURL + "/")
+		if err != nil || (resp != nil && resp.StatusCode >= 500) {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			if err := redisRepo.UnregisterBackend(ctx, backendURL); err != nil {
+				zap.L().Warn("failed to remove dead backend during cleanup", zap.String("url", backendURL), zap.Error(err))
+			} else {
+				zap.L().Info("removed dead backend during cleanup", zap.String("url", backendURL))
+				removed++
+			}
+		} else if resp != nil {
+			resp.Body.Close()
+		}
+	}
+
+	if removed > 0 {
+		zap.L().Info("cleaned up dead backends", zap.Int("removed", removed))
+	}
+}
+
 func main() {
 	if err := env.Load(); err != nil {
 		panic(err)
@@ -53,10 +94,10 @@ func main() {
 
 	if env.Env.BackendPublicURL != "" {
 		redisRepo := instances.NewRedis(services.Redis())
-		
+
 		// Clean up dead backends from Redis on startup (quick health check)
 		cleanupDeadBackends(redisRepo)
-		
+
 		if err := redisRepo.RegisterBackend(context.Background(), env.Env.BackendPublicURL); err != nil {
 			zap.L().Warn("failed to register backend in Redis", zap.Error(err))
 		} else {

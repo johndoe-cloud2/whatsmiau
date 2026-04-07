@@ -1,3 +1,6 @@
+# Local stack: router (8080) + backend (8081) + redis.
+# Un solo puerto público: 8080 = router. El 8081 es solo para depurar el backend directo.
+# Run: make test-stack   o: ./scripts/test-stack.sh
 services:
   router:
     build:

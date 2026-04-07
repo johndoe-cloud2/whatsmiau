@@ -361,7 +361,7 @@ func (s *Whatsmiau) observeAndQrCode(ctx context.Context, id string, client *wha
 			// Device may have been paired in observeConnection; return without QR so API reports "already connected"
 			if client.IsLoggedIn() {
 				zap.L().Debug("client logged in while waiting for QR, returning without QR", zap.String("id", id))
-				return "", nil
+				return "", "", nil
 			}
 			qrCode, ok := s.qrCache.Load(id)
 			if ok && len(qrCode) > 0 {

@@ -9,12 +9,14 @@ import (
 )
 
 func Auth(ctx echo.Context, next echo.HandlerFunc) error {
-	if strings.HasPrefix(ctx.Request().URL.Path, "/swagger/") {
+	p := ctx.Request().URL.Path
+	if p == "/" || p == "/health" {
 		return next(ctx)
 	}
-
-	gotApikey := ctx.Request().Header.Get("apikey")
-	if len(env.Env.ApiKey) == 0 {
+	if strings.HasPrefix(p, "/media/") {
+		return next(ctx)
+	}
+	if strings.HasPrefix(p, "/swagger/") {
 		return next(ctx)
 	}
 
@@ -22,9 +24,7 @@ func Auth(ctx echo.Context, next echo.HandlerFunc) error {
 	if configuredKey == "" {
 		return next(ctx)
 	}
-
-	gotApikey := ctx.Request().Header.Get("apikey")
-	if gotApikey != configuredKey {
+	if ctx.Request().Header.Get("apikey") != configuredKey {
 		return echo.NewHTTPError(http.StatusUnauthorized)
 	}
 

@@ -19,6 +19,7 @@ import (
 	"github.com/verbeux-ai/whatsmiau/repositories/instances"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	waHistorySync "go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"go.uber.org/zap"
@@ -431,6 +432,8 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 			switch e := evt.(type) {
 			case *events.Message:
 				s.handleMessageEvent(id, instance, e, eventMap)
+			case *events.Receipt:
+				s.handleReceiptEvent(id, instance, e, eventMap)
 			case *events.BusinessName:
 				s.handleBusinessNameEvent(id, instance, e, eventMap)
 			case *events.Contact:
@@ -493,20 +496,14 @@ func (s *Whatsmiau) TeardownInstance(id string) {
 	}
 
 	s.clients.Delete(id)
-}
-func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *events.Message, eventMap map[string]bool) {
-	if e.Message != nil {
-		if pm := e.Message.GetProtocolMessage(); pm != nil && pm.GetType() == waE2E.ProtocolMessage_REVOKE {
-			s.handleMessageDeleteEvent(id, instance, e, eventMap)
-			return
-		}
+	s.qrCache.Delete(id)
+	s.pairingCache.Delete(id)
+	s.ClearChatKeyCache(id)
+
+	if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
+		_ = redisRepo.DeleteEmittedMessagesForInstance(ctx, id)
 	}
 
-	if !eventMap["MESSAGES_UPSERT"] {
-		return
-	}
-
-	// Remove instance metadata and route so router stops sending traffic here; notify webhook
 	if err := s.repo.Delete(ctx, id); err != nil {
 		zap.L().Warn("failed to delete instance from Redis", zap.String("instance", id), zap.Error(err))
 	}
@@ -525,7 +522,15 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 		s.emitForInstance(id, payload, webhookURL)
 	}
 }
+
 func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *events.Message, eventMap map[string]bool) {
+	if e.Message != nil {
+		if pm := e.Message.GetProtocolMessage(); pm != nil && pm.GetType() == waE2E.ProtocolMessage_REVOKE {
+			s.handleMessageDeleteEvent(id, instance, e, eventMap)
+			return
+		}
+	}
+
 	if !shouldEmitEvent(instance, "MESSAGES_UPSERT") {
 		return
 	}
@@ -559,7 +564,10 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 
 	messageData.InstanceId = instance.ID
 
-	dateTime := time.Unix(int64(messageData.MessageTimestamp), 0)
+	dateTime := e.Info.Timestamp
+	if dateTime.IsZero() {
+		dateTime = time.Now()
+	}
 	wookMessage := &WookEvent[WookMessageData]{
 		Instance: instance.ID,
 		Data:     messageData,
@@ -628,39 +636,61 @@ func (s *Whatsmiau) handleMessageDeleteEvent(id string, instance *models.Instanc
 	s.emit(wookEvent, instance.Webhook.Url)
 }
 
+func (s *Whatsmiau) convertEventReceipt(id string, evt *events.Receipt) []WookMessageUpdateData {
+	var status WookMessageUpdateStatus
+	switch evt.Type {
+	case types.ReceiptTypeRead:
+		status = MessageStatusRead
+	case types.ReceiptTypeDelivered:
+		status = MessageStatusDeliveryAck
+	default:
+		return nil
+	}
+
+	chatJid, chatLid := s.GetJidLid(context.Background(), id, evt.Chat)
+	participantJid, _ := s.GetJidLid(context.Background(), id, evt.Sender)
+
+	var result []WookMessageUpdateData
+	for _, messageID := range evt.MessageIDs {
+		result = append(result, WookMessageUpdateData{
+			MessageId:   messageID,
+			KeyId:       messageID,
+			RemoteJid:   chatJid,
+			RemoteLid:   chatLid,
+			FromMe:      evt.IsFromMe,
+			Participant: participantJid,
+			Status:      status,
+			InstanceId:  id,
+		})
+	}
+
+	return result
+}
+
 func (s *Whatsmiau) handleReceiptEvent(id string, instance *models.Instance, e *events.Receipt, eventMap map[string]bool) {
 	if !eventMap["MESSAGES_UPDATE"] {
 		return
 	}
 
-	dateTime := e.Info.Timestamp
-	if dateTime.IsZero() {
-		dateTime = time.Now()
-	}
-	fromMe := e.Info.IsFromMe
-	payload := &WookMessageUpsertPayload{
-		Instance:    instance.ID,
-		PhoneNumber: messageData.Key.PhoneNumber,
-		FromMe:      fromMe,
-		Message:     messageContentFromRaw(messageData.Message, messageData.MessageType),
-		DateTime:    dateTime,
-		Event:       WookMessagesUpsert,
-	}
-	if payload.Message.FileBase64 != nil && len(*payload.Message.FileBase64) > 200 {
-		zap.L().Debug("message event", zap.String("instance", id), zap.String("phoneNumber", payload.PhoneNumber), zap.Int("fileBase64Len", len(*payload.Message.FileBase64)))
-	} else {
-		zap.L().Debug("message event", zap.String("instance", id), zap.Any("payload", payload))
-	}
-	webhookURL := getWebhookURL(instance)
-	if webhookURL == "" {
-		zap.L().Warn("skipping message emit: no webhook URL", zap.String("instance", id), zap.Bool("env_webhook_set", env.Env.WebhookURL != ""))
+	if canIgnoreGroup(e, instance) {
 		return
 	}
-	s.emitForInstance(instance.ID, payload, webhookURL)
 
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	s.markMessageEmitted(ctx2, instance.ID, msgKey)
-	cancel2()
+	data := s.convertEventReceipt(id, e)
+	if data == nil {
+		return
+	}
+
+	for _, event := range data {
+		wookData := &WookEvent[WookMessageUpdateData]{
+			Instance: instance.ID,
+			Data:     &event,
+			DateTime: e.Timestamp,
+			Event:    WookMessagesUpdate,
+		}
+
+		s.emit(wookData, instance.Webhook.Url)
+	}
 }
 
 func (s *Whatsmiau) handleBusinessNameEvent(id string, instance *models.Instance, e *events.BusinessName, eventMap map[string]bool) {
@@ -962,7 +992,7 @@ func (s *Whatsmiau) convertContactHistorySync(id string, event []*waHistorySync.
 			continue
 		}
 
-		url, b64Pic, err := s.getPic(id, jid)
+		url, b64Pic, err := s.getPic(id, jid, false)
 		if err != nil {
 			zap.L().Error("failed to get pic", zap.Error(err))
 		}
@@ -1161,7 +1191,7 @@ func (s *Whatsmiau) uploadPic(ctx context.Context, waId, b64Data string) (string
 }
 
 func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, b64Pic, err := s.getPic(id, evt.JID, false)
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
 	}
@@ -1201,7 +1231,7 @@ func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact 
 }
 
 func (s *Whatsmiau) convertGroupInfo(id string, evt *events.GroupInfo) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, b64Pic, err := s.getPic(id, evt.JID, false)
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
 	}
@@ -1234,7 +1264,7 @@ func (s *Whatsmiau) convertGroupInfo(id string, evt *events.GroupInfo) *WookCont
 }
 
 func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, b64Pic, err := s.getPic(id, evt.JID, false)
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
 	}
@@ -1272,7 +1302,7 @@ func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContac
 }
 
 func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, b64Pic, err := s.getPic(id, evt.JID, false)
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
 	}
@@ -1300,7 +1330,7 @@ func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact 
 }
 
 func (s *Whatsmiau) convertBusinessName(id string, evt *events.BusinessName) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, b64Pic, err := s.getPic(id, evt.JID, false)
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
 	}

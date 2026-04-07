@@ -1,6 +1,7 @@
 package local
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"io"
@@ -49,6 +50,14 @@ func (s *Local) Upload(ctx context.Context, fileName, mimetype string, file io.R
 	return url, fileName, nil
 }
 
+func (s *Local) UploadBase64IfDontExists(ctx context.Context, fileName, mimetype, b64 string) (string, error) {
+	path := filepath.Join(s.dir, fileName)
+	if _, err := os.Stat(path); err == nil {
+		return s.baseURL + "/media/" + filepath.Base(fileName), nil
+	}
+	return s.UploadBase64(ctx, fileName, mimetype, b64)
+}
+
 func (s *Local) UploadBase64(ctx context.Context, fileName, mimetype, b64 string) (string, error) {
 	decoded, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
@@ -67,7 +76,7 @@ func (s *Local) UploadBase64(ctx context.Context, fileName, mimetype, b64 string
 	if filepath.Ext(fileName) == "" {
 		fileName = fileName + ext
 	}
-	url, _, err := s.Upload(ctx, fileName, mimetype, strings.NewReader(string(decoded)))
+	url, _, err := s.Upload(ctx, fileName, mimetype, bytes.NewReader(decoded))
 	if err != nil {
 		return "", err
 	}

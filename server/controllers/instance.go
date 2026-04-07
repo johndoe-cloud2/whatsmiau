@@ -34,6 +34,20 @@ func NewInstances(repository interfaces.InstanceRepository, whatsmiau *whatsmiau
 	}
 }
 
+// instanceWithEffectiveWebhook returns a copy of the instance with Webhook.Url set from env WEBHOOK_URL
+// when the instance has no per-instance webhook URL, so API responses show where events are sent.
+func instanceWithEffectiveWebhook(instance *models.Instance) *models.Instance {
+	if instance == nil {
+		return nil
+	}
+	out := *instance
+	out.Webhook = instance.Webhook
+	if env.Env.WebhookURL != "" && out.Webhook.Url == "" {
+		out.Webhook.Url = env.Env.WebhookURL
+	}
+	return &out
+}
+
 // Create godoc
 // @Summary      Create a new WhatsApp instance
 // @Description  Creates a new WhatsApp instance with the given name and optional configuration
@@ -83,6 +97,14 @@ func (s *Instance) Create(ctx echo.Context) error {
 	if err := s.repo.Create(c, request.Instance); err != nil {
 		zap.L().Error("failed to create instance", zap.Error(err))
 		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to create instance")
+	}
+
+	if env.Env.BackendPublicURL != "" {
+		if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
+			if err := redisRepo.SetRoute(c, request.Instance.ID, env.Env.BackendPublicURL); err != nil {
+				zap.L().Warn("failed to set route in Redis", zap.Error(err), zap.String("instance", request.Instance.ID))
+			}
+		}
 	}
 
 	// If migration data is present, import the Baileys session

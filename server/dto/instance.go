@@ -77,6 +77,7 @@ type ConnectInstanceResponse struct {
 	Connected   bool   `json:"connected,omitempty"`
 	Base64      string `json:"base64,omitempty"`
 	PairingCode string `json:"pairingCode,omitempty"`
+	PhoneNumber string `json:"phoneNumber,omitempty"`
 	*models.Instance
 }
 

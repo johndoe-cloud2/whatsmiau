@@ -86,22 +86,16 @@ func (s *Whatsmiau) NumberExists(ctx context.Context, data *NumberExistsRequest)
 		}
 
 		if item.IsIn {
-			// PushName: primero el que devuelve el servidor (nombre que el usuario puso en WhatsApp), luego store, VerifiedName, o número
-			if item.PushName != "" {
-				entry.PushName = item.PushName
-			}
-			if entry.PushName == "" {
-				if contact, err := client.Store.Contacts.GetContact(ctx, item.JID); err == nil {
-					switch {
-					case contact.PushName != "":
-						entry.PushName = contact.PushName
-					case contact.FullName != "":
-						entry.PushName = contact.FullName
-					case contact.FirstName != "":
-						entry.PushName = contact.FirstName
-					case contact.BusinessName != "":
-						entry.PushName = contact.BusinessName
-					}
+			if contact, err := client.Store.Contacts.GetContact(ctx, item.JID); err == nil {
+				switch {
+				case contact.PushName != "":
+					entry.PushName = contact.PushName
+				case contact.FullName != "":
+					entry.PushName = contact.FullName
+				case contact.FirstName != "":
+					entry.PushName = contact.FirstName
+				case contact.BusinessName != "":
+					entry.PushName = contact.BusinessName
 				}
 			}
 			if entry.PushName == "" && item.VerifiedName != nil && item.VerifiedName.Details != nil {
