@@ -38,6 +38,7 @@ type E struct {
 
 	EmitterBufferSize    int `env:"EMITTER_BUFFER_SIZE" envDefault:"2048"`
 	HandlerSemaphoreSize int `env:"HANDLER_SEMAPHORE_SIZE" envDefault:"512"`
+	EmitterWorkers       int `env:"EMITTER_WORKERS" envDefault:"50"`
 
 	// StaleInstanceDays: instances with no webhook event in this many days are removed by the periodic cleanup (0 = disabled).
 	StaleInstanceDays int `env:"STALE_INSTANCE_DAYS" envDefault:"30"`

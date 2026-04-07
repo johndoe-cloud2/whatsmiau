@@ -9,12 +9,12 @@ import (
 )
 
 func Auth(ctx echo.Context, next echo.HandlerFunc) error {
-	// Allow unauthenticated health checks (docker/ECS healthcheck hits GET /)
-	if ctx.Request().URL.Path == "/" || ctx.Request().URL.Path == "/health" {
+	if strings.HasPrefix(ctx.Request().URL.Path, "/swagger/") {
 		return next(ctx)
 	}
-	// Allow access to local media files (e.g. images saved when LOCAL_MEDIA_PATH is set)
-	if strings.HasPrefix(ctx.Request().URL.Path, "/media/") {
+
+	gotApikey := ctx.Request().Header.Get("apikey")
+	if len(env.Env.ApiKey) == 0 {
 		return next(ctx)
 	}
 

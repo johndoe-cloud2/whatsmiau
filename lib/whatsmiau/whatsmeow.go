@@ -34,7 +34,8 @@ type Whatsmiau struct {
 	logger           waLog.Logger
 	repo             interfaces.InstanceRepository
 	qrCache          *xsync.Map[string, string]
-	observerRunning  *xsync.Map[string, bool]
+	pairingCache     *xsync.Map[string, string]
+	observerRunning  *xsync.Map[string, *whatsmeow.Client]
 	instanceCache    *xsync.Map[string, models.Instance]
 	lockConnection   *xsync.Map[string, *sync.Mutex]
 	emitter          chan emitter
@@ -138,8 +139,9 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 		logger:          clientLog,
 		repo:            repo,
 		qrCache:         xsync.NewMap[string, string](),
+		pairingCache:    xsync.NewMap[string, string](),
 		instanceCache:   xsync.NewMap[string, models.Instance](),
-		observerRunning: xsync.NewMap[string, bool](),
+		observerRunning: xsync.NewMap[string, *whatsmeow.Client](),
 		lockConnection:  xsync.NewMap[string, *sync.Mutex](),
 		emitter:         make(chan emitter, env.Env.EmitterBufferSize),
 		httpClient: &http.Client{
@@ -164,38 +166,25 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 
 }
 
-func (s *Whatsmiau) Connect(ctx context.Context, id string) (string, error) {
+func (s *Whatsmiau) Connect(ctx context.Context, id string, phoneNumber string) (qrCode string, pairingCode string, err error) {
 	client, err := s.generateClient(ctx, id)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if client == nil {
-		return "", nil
+		return "", "", nil
 	}
 
 	if qr, ok := s.qrCache.Load(id); ok {
-		return qr, nil
+		pc, _ := s.pairingCache.Load(id)
+		return qr, pc, nil
 	}
 
-	// Re-check in case another goroutine just finished pairing (e.g. poll after success)
-	if client.IsLoggedIn() {
-		return "", nil
-	}
-
-	qrCode, err := s.observeAndQrCode(ctx, id, client)
-	if err != nil {
-		return "", err
-	}
-
-	return qrCode, nil
+	return s.observeAndQrCode(ctx, id, client, phoneNumber)
 }
 
 func (s *Whatsmiau) generateClient(ctx context.Context, id string) (*whatsmeow.Client, error) {
-	lock, ok := s.lockConnection.Load(id)
-	if !ok {
-		lock = &sync.Mutex{}
-		s.lockConnection.Store(id, lock)
-	}
+	lock, _ := s.lockConnection.LoadOrStore(id, &sync.Mutex{})
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -217,14 +206,14 @@ func (s *Whatsmiau) generateClient(ctx context.Context, id string) (*whatsmeow.C
 			return nil, nil
 		}
 
-		_ = client.Connect()
-		if client.IsLoggedIn() {
-			return nil, nil
+		if err := client.Connect(); err != nil {
+			if client.IsLoggedIn() {
+				return nil, nil
+			}
+			return nil, err
 		}
 
-		// Session exists (Store.ID set) but not yet logged in (e.g. reconnecting after QR scan).
-		// Do not delete the device or we would lose the session and show a new QR.
-		if client.Store != nil && client.Store.ID != nil {
+		if client.IsLoggedIn() {
 			return nil, nil
 		}
 
@@ -257,30 +246,31 @@ func (s *Whatsmiau) hasSomeDevice(client *whatsmeow.Client) bool {
 	return true
 }
 
-func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string) {
-	if _, ok := s.observerRunning.Load(id); ok {
-		zap.L().Debug("observer connection already running", zap.String("id", id))
-		return
+func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string, phoneNumber string) {
+	existingClient, loaded := s.observerRunning.LoadOrStore(id, client)
+	if loaded {
+		if existingClient == client {
+			zap.L().Debug("observer connection already running for this client", zap.String("id", id))
+			return
+		}
+		zap.L().Warn("replacing stale observer connection", zap.String("id", id))
+		s.observerRunning.Store(id, client)
 	}
 
 	zap.L().Debug("starting observer connection", zap.String("id", id))
-	s.observerRunning.Store(id, true)
 	defer func() {
 		zap.L().Debug("stopping observer connection", zap.String("id", id))
-		s.observerRunning.Delete(id)
-		s.qrCache.Delete(id)
-		// Do not delete lockConnection here so other Connect() calls block on the same lock
-		// until the current one finishes and reports "already connected"
+		if currentClient, ok := s.observerRunning.Load(id); ok && currentClient == client {
+			s.observerRunning.Delete(id)
+			s.qrCache.Delete(id)
+			s.pairingCache.Delete(id)
+		}
 	}()
 
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute*2)
 	qrChan, err := client.GetQRChannel(ctx)
 	if err != nil {
 		zap.L().Error("failed to observe QR Code", zap.Error(err))
-		s.clients.Delete(id)
-		if err := s.deleteDeviceIfExists(context.TODO(), client); err != nil {
-			zap.L().Error("failed to cleanup device after GetQRChannel error", zap.String("id", id), zap.Error(err))
-		}
 		return
 	}
 
@@ -289,14 +279,12 @@ func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string) {
 	}
 	if err := client.Connect(); err != nil {
 		zap.L().Error("failed to connect connected device", zap.Error(err))
-		s.clients.Delete(id)
-		if err := s.deleteDeviceIfExists(context.TODO(), client); err != nil {
-			zap.L().Error("failed to cleanup device after Connect error", zap.String("id", id), zap.Error(err))
-		}
 		return
 	}
 
 	zap.L().Debug("waiting for QR channel event", zap.String("id", id))
+	emittedConnecting := false
+	pairingRequested := false
 	for {
 		select {
 		case <-ctx.Done(): // QR code expiration
@@ -314,7 +302,21 @@ func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string) {
 			}
 			zap.L().Debug("received QR channel event", zap.String("id", id), zap.Any("evt", evt))
 			if evt.Event == "code" {
+				if !emittedConnecting {
+					s.emitConnectionUpdate(id, "connecting", 0)
+					emittedConnecting = true
+				}
 				s.qrCache.Store(id, evt.Code)
+
+				if phoneNumber != "" && !pairingRequested {
+					pairingRequested = true
+					code, err := client.PairPhone(ctx, phoneNumber, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+					if err != nil {
+						zap.L().Error("failed to request pairing code", zap.String("id", id), zap.Error(err))
+					} else {
+						s.pairingCache.Store(id, code)
+					}
+				}
 				continue
 			}
 
@@ -334,6 +336,7 @@ func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string) {
 					zap.L().Error("failed to update instance after login", zap.Error(err))
 				}
 				s.qrCache.Delete(id)
+				s.pairingCache.Delete(id)
 				return
 			}
 
@@ -342,16 +345,12 @@ func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string) {
 	}
 }
 
-// qrPollTimeout: max time to wait for first QR in this request. If no QR by then, return ( "", nil ) so the API
-// responds 200 "waiting for QR" and the client can poll again; observeConnection keeps running in the background.
-const qrPollTimeout = 15 * time.Second
-
-func (s *Whatsmiau) observeAndQrCode(ctx context.Context, id string, client *whatsmeow.Client) (string, error) {
-	ctx, c := context.WithTimeout(ctx, qrPollTimeout)
+func (s *Whatsmiau) observeAndQrCode(ctx context.Context, id string, client *whatsmeow.Client, phoneNumber string) (string, string, error) {
+	ctx, c := context.WithTimeout(ctx, 15*time.Second)
 	defer c()
 
 	zap.L().Debug("starting observe and qr code", zap.String("id", id))
-	go s.observeConnection(client, id)
+	go s.observeConnection(client, id, phoneNumber)
 
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -367,12 +366,28 @@ func (s *Whatsmiau) observeAndQrCode(ctx context.Context, id string, client *wha
 			qrCode, ok := s.qrCache.Load(id)
 			if ok && len(qrCode) > 0 {
 				zap.L().Debug("got qr code from cache", zap.String("id", id))
-				return qrCode, nil
+				if phoneNumber != "" {
+					// wait a bit more for pairing code to be generated
+					pc, pcOk := s.pairingCache.Load(id)
+					if pcOk {
+						return qrCode, pc, nil
+					}
+					continue
+				}
+				return qrCode, "", nil
 			}
 		case <-ctx.Done():
-			// Timeout or cancel: no QR yet. Return no error so API responds 200 "waiting for QR"; client will retry.
-			zap.L().Debug("no QR yet within window, responding without QR for client to retry", zap.String("id", id))
-			return "", nil
+			zap.L().Debug("observe and qr code context done", zap.String("id", id), zap.Error(ctx.Err()))
+			// return whatever we have so far
+			qr, _ := s.qrCache.Load(id)
+			pc, _ := s.pairingCache.Load(id)
+			if qr != "" {
+				if phoneNumber != "" && pc == "" {
+					return qr, "", ctx.Err()
+				}
+				return qr, pc, nil
+			}
+			return "", "", ctx.Err()
 		}
 	}
 }
@@ -431,7 +446,15 @@ func (s *Whatsmiau) Logout(ctx context.Context, id string) error {
 // Disconnect tears down the instance completely: device store, Redis, route and webhook.
 // The number is removed as if it had never existed.
 func (s *Whatsmiau) Disconnect(id string) error {
-	s.TeardownInstance(id)
+	client, ok := s.clients.Load(id)
+	if !ok {
+		zap.L().Warn("failed to disconnect (device not loaded)", zap.String("id", id))
+		return nil
+	}
+
+	client.Disconnect()
+	s.qrCache.Delete(id)
+	s.pairingCache.Delete(id)
 	return nil
 }
 
@@ -475,7 +498,7 @@ func (s *Whatsmiau) GetJidLid(ctx context.Context, id string, jid types.JID) (st
 
 func (s *Whatsmiau) extractJidLid(ctx context.Context, id string, jid types.JID) (string, string) {
 	client, ok := s.clients.Load(id)
-	if !ok {
+	if !ok || client == nil || client.Store == nil || client.Store.LIDs == nil {
 		return jid.ToNonAD().String(), ""
 	}
 	if client.Store == nil || client.Store.LIDs == nil {

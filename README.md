@@ -170,78 +170,35 @@ curl -X POST 'http://localhost:8080/v1/message/sendText/my-instance' \
 -d ".{\"number\": \"1234567890\",\"textMessage\": {\"text\": \"Hello from WhatsMiau!\"}}"
 ```
 
-## API Routes
+## API Documentation
 
-Same Pattern: https://www.postman.com/agenciadgcode/evolution-api/overview
-| Method | Path                                      | Description                 |
-|--------|-------------------------------------------|-----------------------------|
-| GET    | /v1                                       | API info and version        |
-| POST   | /v1/instance                            | Create a new instance       |
-| GET    | /v1/instance                            | List all instances          |
-| POST   | /v1/instance/:id/connect                | Connect to an instance      |
-| POST   | /v1/instance/:id/logout                 | Logout from an instance     |
-| DELETE | /v1/instance/:id                        | Delete an instance          |
-| GET    | /v1/instance/:id/status                 | Get instance status         |
-| POST   | /v1/instance/:instance/message/text     | Send a text message         |
-| POST   | /v1/instance/:instance/message/audio    | Send an audio message       |
-| POST   | /v1/instance/:instance/message/document | Send a document             |
-| POST   | /v1/instance/:instance/message/image    | Send an image message       |
-| POST   | /v1/instance/:instance/chat/presence    | Send chat presence          |
-| POST   | /v1/instance/:instance/chat/read-messages| Mark messages as read       |
-| POST   | /v1/instance/:instance/chat/whatsapp-numbers| Check if a number is on WhatsApp |
+The API is fully documented using Swagger/OpenAPI. Once the server is running, you can access the interactive documentation at:
 
-### Evolution API Compatibility Routes
+```
+http://localhost:8080/swagger/index.html
+```
 
-| Method | Path                               | Description                 |
-|--- |--- |--- |
-| POST   | /v1/instance/create                | Create a new instance       |
-| GET    | /v1/instance/fetchInstances        | List all instances          |
-| GET    | /v1/instance/connect/:id           | Connect to an instance      |
-| GET    | /v1/instance/connect/:id/image     | Get connection QR as image |
-| GET    | /v1/instance/connectionState/:id   | Get instance status         |
-| DELETE | /v1/instance/logout/:id            | Logout from an instance     |
-| DELETE | /v1/instance/delete/:id            | Delete an instance          |
-| PUT    | /v1/instance/update/:id            | Update an instance          |
-| POST   | /v1/message/sendText/:instance     | Send a text message         |
-| POST   | /v1/message/sendWhatsAppAudio/:instance | Send an audio message       |
-| POST   | /v1/message/sendMedia/:instance    | Send a media message        |
-| POST   | /v1/message/sendReaction/:instance | Send a reaction to a message |
-| POST   | /v1/chat/markMessageAsRead/:instance | Mark messages as read       |
-| POST   | /v1/chat/sendPresence/:instance    | Send chat presence          |
-| POST   | /v1/chat/whatsappNumbers/:instance | Check if a number is on WhatsApp |
+No API key is required to access the documentation page.
+
+The Swagger UI allows you to explore all available routes, view request/response schemas, and test the API directly from your browser.
 
 ## Supported Events
 
 The application can send webhook events for the following actions:
 
-| Event                | Description                                                         |
-|----------------------|---------------------------------------------------------------------|
-| `MESSAGES_UPSERT`   | Triggered when a new message is received.                           |
-| `MESSAGES_UPDATE`   | Triggered when a message status changes (e.g., read).                 |
-| `CONTACTS_UPSERT`   | Triggered when a contact is created or updated.                     |
-| `CONNECTION_UPDATE` | Triggered when the device connects (pairing/QR success).            |
-| `SESSION_LOST`      | Triggered when the WhatsApp session is lost (Router/Redis setup).    |
+| Event             | Description                                         |
+|-------------------|-----------------------------------------------------|
+| `MESSAGES_UPSERT` | Triggered when a new message is received.           |
+| `MESSAGES_UPDATE` | Triggered when a message status changes (e.g., read). |
+| `MESSAGES_DELETE` | Triggered when a message is deleted for everyone.   |
+| `CONTACTS_UPSERT` | Triggered when a contact is created or updated.     |
 
-When `WEBHOOK_URL` is set, the API sends a **`session.connected`** event (no subscription needed) once at startup when the server has finished initializing (with empty `instance` and `phoneNumber`), and again for each device when it connects (with `instance` and `phoneNumber`).
 
-**Note:** Only events you subscribe to (in `webhook.events` when creating/updating the instance) are sent. API errors (e.g. "instance already exists", "context deadline exceeded") and internal library logs (e.g. "Successfully paired") are not webhook events and are never posted to the webhook URL.
+## Contributors
 
-### Media (images, audio, documents, video) in webhooks
-
-For `messages.upsert` events, media messages include:
-
-- **Raw data from WhatsApp** (what the library receives): inside `data.message.imageMessage` (or `audioMessage`, `documentMessage`, `videoMessage`) you get `url`, `mediaKey`, `directPath`, `mimetype`, `caption`, etc. That media is **encrypted**; the URL is WhatsApp’s CDN and requires decryption with `mediaKey` (handled by the backend when it downloads).
-- **Decoded file** (image/audio/document/video already decrypted):
-  - If **`WEBHOOK_URL`** is set, the backend decodes media and adds **`decodedBase64`** in the same object (e.g. `data.message.imageMessage.decodedBase64`). You can decode it to get the file:
-    ```js
-    const buffer = Buffer.from(data.message.imageMessage.decodedBase64, 'base64');
-    require('fs').writeFileSync('image.jpg', buffer);
-    ```
-  - If the instance has **`webhook.base64: true`**, you also get `data.message.base64` and `data.message.imageMessage.decodedBase64`.
-  - If **GCS storage** is configured, you get **`decodedMediaUrl`** (e.g. `data.message.imageMessage.decodedMediaUrl`) with a public URL to the downloaded file, and optionally `data.message.mediaUrl`.
-
-So: use **`data.message.imageMessage`** for the raw WA payload, and **`data.message.imageMessage.decodedBase64`** or **`data.message.imageMessage.decodedMediaUrl`** to obtain the actual image file (when `WEBHOOK_URL` or webhook.base64 / storage is configured).
-
+<a href="https://github.com/verbeux-ai/whatsmiau/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=verbeux-ai/whatsmiau" />
+</a>
 
 ## Did you like project?
 Donate: https://buy.stripe.com/8x28wI5vKfPbe9b8ih1VK0f

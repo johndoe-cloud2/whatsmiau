@@ -19,51 +19,25 @@ import (
 	"github.com/verbeux-ai/whatsmiau/services"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
+
+	_ "github.com/verbeux-ai/whatsmiau/docs"
 )
 
-// cleanupDeadBackends removes unreachable backend URLs from Redis on startup.
-// This prevents the router from trying to proxy to old/dead ECS task IPs.
-func cleanupDeadBackends(redisRepo *instances.RedisInstance) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// @title           WhatsMiau API
+// @version         0.3.2
+// @description     WhatsMiau - WhatsApp API compatible with Evolution API. Provides instance management, messaging, and chat operations over WhatsApp Web.
 
-	backends, err := redisRepo.GetAllBackends(ctx)
-	if err != nil {
-		zap.L().Warn("failed to get backends for cleanup", zap.Error(err))
-		return
-	}
-	if len(backends) == 0 {
-		return
-	}
+// @contact.name   Verbeux AI
+// @contact.url    https://github.com/verbeux-ai/whatsmiau
 
-	zap.L().Info("checking backends health on startup", zap.Int("count", len(backends)))
-	client := &http.Client{Timeout: 3 * time.Second}
-	removed := 0
+// @license.name  MIT
 
-	for _, backendURL := range backends {
-		// Quick health check: GET / (backend serves /health or / for health)
-		resp, err := client.Get(backendURL + "/")
-		if err != nil || (resp != nil && resp.StatusCode >= 500) {
-			if resp != nil {
-				resp.Body.Close()
-			}
-			// Backend is dead or returning 5xx; remove it
-			if err := redisRepo.UnregisterBackend(ctx, backendURL); err != nil {
-				zap.L().Warn("failed to remove dead backend during cleanup", zap.String("url", backendURL), zap.Error(err))
-			} else {
-				zap.L().Info("removed dead backend during cleanup", zap.String("url", backendURL))
-				removed++
-			}
-		} else if resp != nil {
-			resp.Body.Close()
-		}
-	}
+// @host      localhost:8080
+// @BasePath  /v1
 
-	if removed > 0 {
-		zap.L().Info("cleaned up dead backends", zap.Int("removed", removed))
-	}
-}
-
+// @securityDefinitions.apikey ApiKeyAuth
+// @in header
+// @name apikey
 func main() {
 	if err := env.Load(); err != nil {
 		panic(err)

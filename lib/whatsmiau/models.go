@@ -12,8 +12,8 @@ const (
 	WookMessagesUpsert   Wook = "messages.upsert"
 	WookMessagesUpdate   Wook = "messages.update"
 	WookContactsUpsert   Wook = "contacts.upsert"
-	WookSessionLost      Wook = "session.lost"
 	WookConnectionUpdate Wook = "connection.update"
+  WookMessagesDelete  Wook = "messages.delete"
 )
 
 type WookEvent[data any] struct {
@@ -269,6 +269,15 @@ const (
 	MessageStatusRead        WookMessageUpdateStatus = "READ"
 )
 
+type WookMessageDeleteData struct {
+	Id          string `json:"id,omitempty"`
+	RemoteJid   string `json:"remoteJid,omitempty"`
+	FromMe      bool   `json:"fromMe"`
+	Participant string `json:"participant,omitempty"`
+	Status      string `json:"status,omitempty"`
+	InstanceId  string `json:"instanceId,omitempty"`
+}
+
 type WookMessageUpdateData struct {
 	MessageId      string                  `json:"messageId,omitempty"`
 	KeyId          string                  `json:"keyId,omitempty"`
@@ -291,3 +300,12 @@ type WookContact struct {
 }
 
 type WookContactUpsertData []WookContact
+
+type WookConnectionUpdateData struct {
+	Instance          string `json:"instance,omitempty"`
+	Wuid              string `json:"wuid,omitempty"`
+	ProfileName       string `json:"profileName,omitempty"`
+	ProfilePictureUrl string `json:"profilePictureUrl,omitempty"`
+	State             string `json:"state"`
+	StatusReason      int    `json:"statusReason,omitempty"`
+}
