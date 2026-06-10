@@ -456,6 +456,15 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 				s.handleConnectionUpdateEvent(id, instance, "close", 0, eventMap)
 			case *events.ConnectFailure:
 				s.handleConnectionUpdateEvent(id, instance, "close", int(e.Reason), eventMap)
+			case *events.UndecryptableMessage:
+				// Incoming message that failed to decrypt (broken/desynced Signal session). whatsmeow
+				// already auto-requests a retry; we surface it at Warn so it's not silently dropped as
+				// an "unknown event". Persistent occurrences mean the instance needs re-pairing.
+				zap.L().Warn("undecryptable incoming message",
+					zap.String("instance", id),
+					zap.String("messageId", e.Info.ID),
+					zap.String("sender", e.Info.Sender.String()),
+					zap.Bool("isUnavailable", e.IsUnavailable))
 			default:
 				zap.L().Debug("unknown event", zap.String("type", fmt.Sprintf("%T", evt)), zap.Any("raw", evt))
 			}
@@ -1062,18 +1071,39 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 	ctx, c := context.WithTimeout(context.Background(), time.Second*60)
 	defer c()
 
-	client, ok := s.clients.Load(id)
-	if !ok {
-		zap.L().Warn("no client for event", zap.String("id", id))
-		return nil
-	}
-
 	if evt == nil || evt.Message == nil {
 		return nil
 	}
 
+	// The client may be missing from the registry while its socket still fires events
+	// ("ghost client"): if we returned nil here the message would be dropped silently and
+	// MESSAGES_UPSERT would never be emitted, even though receipts (MESSAGES_UPDATE) keep
+	// flowing because their path degrades gracefully. Instead, emit what we can: media
+	// download needs a connected client (skipped when absent), but text/leads still go out.
+	client, ok := s.clients.Load(id)
+	if !ok {
+		zap.L().Warn("no client for event; emitting without client (media download skipped)", zap.String("id", id), zap.String("messageId", evt.Info.ID))
+		client = nil
+	}
+
 	jid, lid := s.GetJidLid(ctx, id, evt.Info.Chat)
 	senderJid, _ := s.GetJidLid(ctx, id, evt.Info.Sender)
+
+	// LID-addressed messages carry the real phone number (PN) in the alt-addressing field.
+	// Resolving LID->PN via the client store can miss (mapping not synced, or ghost client with
+	// no client at all), which would make us emit the opaque @lid as the contact number and break
+	// lead matching downstream. SenderAlt gives us the PN deterministically, so prefer it. Groups
+	// are filtered out earlier, so for these 1:1 chats Chat == Sender.
+	if alt := evt.Info.SenderAlt; alt.Server == types.DefaultUserServer && alt.User != "" {
+		altPN := alt.ToNonAD().String()
+		if strings.HasSuffix(senderJid, "@lid") {
+			senderJid = altPN
+		}
+		if strings.HasSuffix(jid, "@lid") {
+			jid = altPN
+		}
+	}
+
 	s.StoreChatKey(id, lid, jid, lid)
 
 	// Always unwrap to work with the real content
@@ -1135,6 +1165,13 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 }
 
 func (s *Whatsmiau) uploadMessageFile(ctx context.Context, instance *models.Instance, client *whatsmeow.Client, fileMessage whatsmeow.DownloadableMessage, mimetype, fileName string) (string, string) {
+	// No connected client (e.g. ghost client): we can't download media. Skip rather than
+	// dropping the whole message — caption/text is still emitted by the caller.
+	if client == nil {
+		zap.L().Warn("skipping media download: no client", zap.String("instance", instance.ID))
+		return "", ""
+	}
+
 	var (
 		b64Result string
 		urlResult string

@@ -459,11 +459,18 @@ func (s *Whatsmiau) observeAndQrCode(ctx context.Context, id string, client *wha
 }
 
 func (s *Whatsmiau) deleteDeviceIfExists(ctx context.Context, client *whatsmeow.Client) error {
+	// Detach handlers and close the socket before discarding the client. Otherwise a client
+	// removed from s.clients can keep its live connection and keep firing Handle(id) events
+	// ("ghost client"): those events then fail s.clients.Load and the messages are dropped.
+	client.RemoveEventHandlers()
+
 	if client.IsLoggedIn() {
 		if err := client.Logout(ctx); err != nil {
 			zap.L().Error("failed to logout", zap.Error(err))
 			return err
 		}
+	} else if client.IsConnected() {
+		client.Disconnect()
 	}
 
 	if client.Store != nil && client.Store.ID != nil {
