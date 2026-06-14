@@ -203,29 +203,20 @@ func messageKey(chatJid string, fromMe bool, messageId string) string {
 	return fmt.Sprintf("%s|%v|%s", chatJid, fromMe, messageId)
 }
 
-// shouldEmitMessageEvent returns false if we already emitted this message (dedup). Otherwise marks as emitted after emitting.
-// Call this before emitting; if it returns true, caller must emit and then call markMessageEmitted.
-func (s *Whatsmiau) wasMessageEmitted(ctx context.Context, instanceID, key string) bool {
+// tryClaimMessage atomically claims a message for emission via Redis SETNX.
+// Returns true if the caller won (should emit), false if already claimed by another goroutine.
+// Falls back to true on Redis errors so messages are never silently dropped.
+func (s *Whatsmiau) tryClaimMessage(ctx context.Context, instanceID, key string) bool {
 	redisRepo, ok := s.repo.(*instances.RedisInstance)
 	if !ok {
-		return false
+		return true
 	}
-	yes, err := redisRepo.WasMessageEmitted(ctx, instanceID, key)
+	claimed, err := redisRepo.TryClaimMessage(ctx, instanceID, key)
 	if err != nil {
-		zap.L().Warn("failed to check emitted message", zap.String("instance", instanceID), zap.String("key", key), zap.Error(err))
-		return false
+		zap.L().Warn("tryClaimMessage: Redis error, allowing emit to avoid silent drop", zap.String("instance", instanceID), zap.String("key", key), zap.Error(err))
+		return true
 	}
-	return yes
-}
-
-func (s *Whatsmiau) markMessageEmitted(ctx context.Context, instanceID, key string) {
-	redisRepo, ok := s.repo.(*instances.RedisInstance)
-	if !ok {
-		return
-	}
-	if err := redisRepo.MarkMessageEmitted(ctx, instanceID, key); err != nil {
-		zap.L().Warn("failed to mark message emitted", zap.String("instance", instanceID), zap.String("key", key), zap.Error(err))
-	}
+	return claimed
 }
 
 // sessionEventPayload is the flat format for session.lost (no "data" wrapper).
@@ -359,15 +350,15 @@ func (s *Whatsmiau) EmitMessageSent(instance *models.Instance, instanceID, remot
 	if instance != nil && !shouldEmitEvent(instance, "MESSAGES_UPSERT") {
 		return
 	}
-	// Dedup: skip if we already emitted this sent message.
+	// Dedup: atomically claim this sent message via Redis SETNX before doing any work.
 	msgKey := messageKey(remoteJID, true, messageID)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if s.wasMessageEmitted(ctx, instanceID, msgKey) {
-		cancel()
+	claimed := s.tryClaimMessage(ctx, instanceID, msgKey)
+	cancel()
+	if !claimed {
 		zap.L().Debug("skipping duplicate message sent event", zap.String("instance", instanceID), zap.String("messageId", messageID))
 		return
 	}
-	cancel()
 
 	if raw != nil && raw.Base64 != "" {
 		raw.Filebase64 = &raw.Base64
@@ -386,10 +377,6 @@ func (s *Whatsmiau) EmitMessageSent(instance *models.Instance, instanceID, remot
 	}
 	zap.L().Debug("emitting message sent to webhook", zap.String("instance", instanceID), zap.String("event", string(WookMessagesUpsert)))
 	s.emitForInstance(instanceID, payload, url)
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	s.markMessageEmitted(ctx2, instanceID, msgKey)
-	cancel2()
 }
 
 func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
@@ -574,15 +561,15 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 		return
 	}
 
-	// Dedup: only emit if we haven't already sent this message id to the webhook.
+	// Dedup: atomically claim this message via Redis SETNX before doing any work.
 	msgKey := messageKey(e.Info.Chat.String(), e.Info.IsFromMe, e.Info.ID)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if s.wasMessageEmitted(ctx, instance.ID, msgKey) {
-		cancel()
+	claimed := s.tryClaimMessage(ctx, instance.ID, msgKey)
+	cancel()
+	if !claimed {
 		zap.L().Debug("skipping duplicate message event", zap.String("instance", id), zap.String("messageId", e.Info.ID))
 		return
 	}
-	cancel()
 
 	messageData := s.convertEventMessage(id, instance, e)
 	if messageData == nil {

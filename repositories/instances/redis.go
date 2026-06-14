@@ -321,24 +321,17 @@ func (s *RedisInstance) keyEmittedMessage(instanceID, messageKey string) string 
 	return fmt.Sprintf("emitted:%s:%s", instanceID, messageKey)
 }
 
-// WasMessageEmitted returns true if we already emitted a webhook event for this message (same instance + message key).
-func (s *RedisInstance) WasMessageEmitted(ctx context.Context, instanceID, messageKey string) (bool, error) {
+// TryClaimMessage atomically sets the emitted key only if it does not exist (Redis SETNX).
+// Returns true if the caller won the claim (first to process this message), false if already claimed.
+func (s *RedisInstance) TryClaimMessage(ctx context.Context, instanceID, messageKey string) (bool, error) {
 	if instanceID == "" || messageKey == "" {
-		return false, nil
+		return true, nil
 	}
-	n, err := s.db.Exists(ctx, s.keyEmittedMessage(instanceID, messageKey)).Result()
+	ok, err := s.db.SetNX(ctx, s.keyEmittedMessage(instanceID, messageKey), "1", emittedMessageTTL).Result()
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
-}
-
-// MarkMessageEmitted records that we emitted a webhook event for this message so we don't send duplicates.
-func (s *RedisInstance) MarkMessageEmitted(ctx context.Context, instanceID, messageKey string) error {
-	if instanceID == "" || messageKey == "" {
-		return nil
-	}
-	return s.db.Set(ctx, s.keyEmittedMessage(instanceID, messageKey), "1", emittedMessageTTL).Err()
+	return ok, nil
 }
 
 // DeleteEmittedMessagesForInstance removes all emitted-message keys for this instance (e.g. on teardown).
