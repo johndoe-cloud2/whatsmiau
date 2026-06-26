@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -85,6 +86,10 @@ func (s *Message) SendText(ctx echo.Context) error {
 	res, err := s.whatsmiau.SendText(c, sendText)
 	if err != nil {
 		zap.L().Error("Whatsmiau.SendText failed", zap.Error(err))
+		if strings.Contains(err.Error(), "server returned error 463") {
+			zap.L().Warn("WhatsApp error 463: disconnecting instance for recovery", zap.String("instance", request.InstanceID))
+			go s.whatsmiau.DisconnectClient(request.InstanceID)
+		}
 		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to send text")
 	}
 

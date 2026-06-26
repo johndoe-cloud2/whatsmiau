@@ -523,6 +523,17 @@ func (s *Whatsmiau) Disconnect(id string) error {
 	return nil
 }
 
+// DisconnectClient closes only the WebSocket for an instance without deleting session data.
+// whatsmeow will attempt automatic reconnection. Use when the session may recover (e.g. WA error 463)
+// rather than on permanent logout. The Disconnected event fires the connection.update:close webhook.
+func (s *Whatsmiau) DisconnectClient(id string) {
+	client, ok := s.clients.Load(id)
+	if !ok {
+		return
+	}
+	client.Disconnect()
+}
+
 // PhoneE164 returns the paired WhatsApp phone number (digits) if known: in-memory client first, then Redis RemoteJID.
 func (s *Whatsmiau) PhoneE164(ctx context.Context, id string) string {
 	if client, ok := s.clients.Load(id); ok && client != nil && client.Store != nil && client.Store.ID != nil {

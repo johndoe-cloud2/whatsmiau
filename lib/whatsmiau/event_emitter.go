@@ -561,6 +561,13 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 		return
 	}
 
+	// Messages with nil content (e.g. unavailable media, unknown protocol types) cannot
+	// be converted. Log at Debug to avoid noisy error spam and return early.
+	if e.Message == nil {
+		zap.L().Debug("skipping message event with nil content", zap.String("instance", id), zap.String("messageId", e.Info.ID))
+		return
+	}
+
 	// Dedup: atomically claim this message via Redis SETNX before doing any work.
 	msgKey := messageKey(e.Info.Chat.String(), e.Info.IsFromMe, e.Info.ID)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
