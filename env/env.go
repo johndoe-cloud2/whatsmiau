@@ -43,6 +43,13 @@ type E struct {
 	// StaleInstanceDays: instances with no webhook event in this many days are removed by the periodic cleanup (0 = disabled).
 	StaleInstanceDays int `env:"STALE_INSTANCE_DAYS" envDefault:"30"`
 
+	// HistorySyncEnabled: download history sync blobs and emit their messages to the webhook as
+	// messages.upsert. Redis dedup skips already-delivered messages, so only missing ones go out.
+	HistorySyncEnabled bool `env:"HISTORY_SYNC_ENABLED" envDefault:"false"`
+	// HistorySyncMaxAgeHours: skip history messages older than this (0 = no limit). Default matches
+	// the 7-day emitted-message dedup TTL: beyond it dedup can't tell delivered from missing.
+	HistorySyncMaxAgeHours int `env:"HISTORY_SYNC_MAX_AGE_HOURS" envDefault:"168"`
+
 	ProxyAddresses []string `env:"PROXY_ADDRESSES" envDefault:""`      // random choices proxies ex: <SOCKS5|HTTP|HTTPS>://<username>:<password>@<host>:<port>
 	ProxyStrategy  string   `env:"PROXY_STRATEGY" envDefault:"RANDOM"` // todo: implement BALANCED
 	ProxyNoMedia   bool     `env:"PROXY_NO_MEDIA" envDefault:"false"`

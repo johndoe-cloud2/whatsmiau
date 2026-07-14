@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -15,6 +16,7 @@ import (
 	"github.com/verbeux-ai/whatsmiau/repositories/instances"
 	"github.com/verbeux-ai/whatsmiau/services"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -45,6 +47,20 @@ type Whatsmiau struct {
 	handlerSemaphore chan struct{}
 	// chatKeyCache: key "instanceID:lid" -> ChatKeyCache, so we can resolve LID to remoteJid when an event has no remoteJid.
 	chatKeyCache *xsync.Map[string, ChatKeyCache]
+	// outdatedRecovery guards the 405 ClientOutdated recovery so only one runs at a time.
+	outdatedRecovery atomic.Bool
+}
+
+// newWAClient creates a whatsmeow client with the settings every whatsmiau client needs.
+func newWAClient(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
+	client := whatsmeow.NewClient(device, logger)
+	// Only auto-download history sync blobs when enabled; the emitter turns them into
+	// webhook events (see handleHistorySyncEvent). Otherwise notifications are ignored.
+	client.ManualHistorySyncDownload = !env.Env.HistorySyncEnabled
+	// Ask the primary phone to re-send messages that arrive undecryptable/unavailable
+	// (broken Signal session): the recovered message is dispatched as a normal Message event.
+	client.AutomaticMessageRerequestFromPhone = true
+	return client
 }
 
 var instance *Whatsmiau
@@ -86,10 +102,16 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 
 	clients := xsync.NewMap[string, *whatsmeow.Client]()
 
+	// Fetch the current WA web version before connecting: a stale baked-in version
+	// makes WhatsApp reject every handshake with 405 ClientOutdated.
+	if _, err := RefreshWAVersion(ctx); err != nil {
+		zap.L().Warn("failed to fetch latest WA version, starting with built-in version",
+			zap.Error(err), zap.String("version", store.GetWAVersion().String()))
+	}
+
 	clientLog := waLog.Stdout("Client", level, false)
 	for _, device := range deviceStore {
-		client := whatsmeow.NewClient(device, clientLog)
-		client.ManualHistorySyncDownload = true // don't auto-download history on connect; only when requested via API
+		client := newWAClient(device, clientLog)
 		if client.Store.ID == nil {
 			zap.L().Error("device without id on db", zap.Any("device", device))
 			continue
@@ -157,6 +179,7 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 
 	go instance.startEmitter()
 	go instance.runStaleInstancesCleanup()
+	go instance.runWAVersionRefresher()
 
 	clients.Range(func(id string, client *whatsmeow.Client) bool {
 		zap.L().Info("starting event handler", zap.String("jid", client.Store.ID.String()))
@@ -195,8 +218,7 @@ func (s *Whatsmiau) generateClient(ctx context.Context, id string) (*whatsmeow.C
 	client, ok := s.clients.Load(id)
 	if !ok {
 		device := s.container.NewDevice()
-		client = whatsmeow.NewClient(device, s.logger)
-		client.ManualHistorySyncDownload = true // don't auto-download history on connect; only when requested via API
+		client = newWAClient(device, s.logger)
 		s.clients.Store(id, client)
 	}
 
@@ -211,14 +233,23 @@ func (s *Whatsmiau) generateClient(ctx context.Context, id string) (*whatsmeow.C
 		}
 
 		if err := client.Connect(); err != nil {
-			if client.IsLoggedIn() {
+			// "already connected" during the post-scan 515 restart: login completes in a
+			// few seconds, so wait for it instead of failing the caller's poll.
+			if waitForLogin(ctx, client, 8*time.Second) {
 				return nil, nil
 			}
 			return nil, err
 		}
 
-		if client.IsLoggedIn() {
+		// The socket may still be mid-handshake (e.g. the 515 restart right after a QR
+		// scan): deleting the device now would log out a healthy session and start a new
+		// QR pairing. Give login a few seconds before treating the session as dead.
+		if waitForLogin(ctx, client, 8*time.Second) {
 			return nil, nil
+		}
+		if ctx.Err() != nil {
+			// Caller gave up while we waited; don't destroy a possibly-healthy session.
+			return nil, ctx.Err()
 		}
 
 		s.clients.Delete(id)
@@ -228,9 +259,8 @@ func (s *Whatsmiau) generateClient(ctx context.Context, id string) (*whatsmeow.C
 		}
 
 		device := s.container.NewDevice()
-		client = whatsmeow.NewClient(device, s.logger)
-		client.ManualHistorySyncDownload = true // don't auto-download history on connect; only when requested via API
-		s.clients.Store(id, client)             // replaces old client
+		client = newWAClient(device, s.logger)
+		s.clients.Store(id, client) // replaces old client
 	}
 
 	return client, nil
@@ -296,6 +326,22 @@ func jidsMatchForInstance(a, b string) bool {
 		return false
 	}
 	return ja.User == jb.User && ja.Server == jb.Server
+}
+
+// waitForLogin polls IsLoggedIn up to timeout. Returns early when the caller's ctx is done.
+func waitForLogin(ctx context.Context, client *whatsmeow.Client, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if client.IsLoggedIn() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return client.IsLoggedIn()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return client.IsLoggedIn()
 }
 
 func (s *Whatsmiau) hasSomeDevice(client *whatsmeow.Client) bool {

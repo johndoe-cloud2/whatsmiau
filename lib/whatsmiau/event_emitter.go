@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -390,6 +391,13 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 				s.handleLoggedOut(id)
 				return
 			}
+			// ClientOutdated (405): whatsmeow disables its auto-reconnect, so refresh the WA
+			// version and reconnect ourselves. Handled before the instance check: recovery is
+			// global and must run even when the Redis lookup fails.
+			if _, ok := evt.(*events.ClientOutdated); ok {
+				s.handleClientOutdated(id)
+				return
+			}
 
 			// Connected can emit with nil instance when WEBHOOK_URL env is set (prod): avoids
 			// "no instance found" when Redis/instance lookup fails due to timing or multi-backend.
@@ -443,6 +451,8 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 				s.handleConnectionUpdateEvent(id, instance, "close", 0, eventMap)
 			case *events.ConnectFailure:
 				s.handleConnectionUpdateEvent(id, instance, "close", int(e.Reason), eventMap)
+			case *events.HistorySync:
+				s.handleHistorySyncEvent(id, instance, e, eventMap)
 			case *events.UndecryptableMessage:
 				// Incoming message that failed to decrypt (broken/desynced Signal session). whatsmeow
 				// already auto-requests a retry; we surface it at Warn so it's not silently dropped as
@@ -613,6 +623,86 @@ func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *
 	}
 	zap.L().Debug("emitting message to webhook", zap.String("instance", id), zap.String("url", url))
 	s.emitForInstance(instance.ID, wookMessage, url)
+}
+
+// handleHistorySyncEvent emits the messages inside a history sync blob as regular
+// messages.upsert events. Each message goes through handleMessageEvent, so the live-message
+// filters (fromMe, groups) and the Redis claim dedup apply: messages already delivered are
+// skipped and only missing ones (e.g. ON_DEMAND recovery of undecryptable messages) reach
+// the webhook.
+func (s *Whatsmiau) handleHistorySyncEvent(id string, instance *models.Instance, e *events.HistorySync, eventMap map[string]bool) {
+	if !env.Env.HistorySyncEnabled {
+		return
+	}
+
+	syncType := e.Data.GetSyncType()
+	switch syncType {
+	case waHistorySync.HistorySync_INITIAL_STATUS_V3, waHistorySync.HistorySync_PUSH_NAME, waHistorySync.HistorySync_NON_BLOCKING_DATA:
+		return // these carry no conversation messages
+	}
+
+	client, ok := s.clients.Load(id)
+	if !ok {
+		zap.L().Warn("history sync: no client for instance", zap.String("instance", id))
+		return
+	}
+
+	// Beyond the dedup TTL we can't tell delivered from missing, so old history would be
+	// re-emitted as new messages (e.g. flooding bots after a re-pairing). Skip it.
+	var minTimestamp time.Time
+	if env.Env.HistorySyncMaxAgeHours > 0 {
+		minTimestamp = time.Now().Add(-time.Duration(env.Env.HistorySyncMaxAgeHours) * time.Hour)
+	}
+
+	skippedOld := 0
+	var parsed []*events.Message
+	for _, conv := range e.Data.GetConversations() {
+		chatJID, err := types.ParseJID(conv.GetID())
+		if err != nil {
+			zap.L().Warn("history sync: invalid chat jid", zap.String("instance", id), zap.String("chat", conv.GetID()), zap.Error(err))
+			continue
+		}
+		if isGroupOrChannelJID(chatJID.String()) {
+			continue
+		}
+		for _, histMsg := range conv.GetMessages() {
+			webMsg := histMsg.GetMessage()
+			if webMsg == nil {
+				continue
+			}
+			// handleMessageEvent drops own messages anyway; skipping before parsing also
+			// avoids ParseWebMessage's own-JID lookup, which fails during re-pairing.
+			if webMsg.GetKey().GetFromMe() {
+				continue
+			}
+			msgEvt, err := client.ParseWebMessage(chatJID, webMsg)
+			if err != nil {
+				zap.L().Debug("history sync: failed to parse message", zap.String("instance", id), zap.String("chat", chatJID.String()), zap.Error(err))
+				continue
+			}
+			if !minTimestamp.IsZero() && msgEvt.Info.Timestamp.Before(minTimestamp) {
+				skippedOld++
+				continue
+			}
+			parsed = append(parsed, msgEvt)
+		}
+	}
+
+	// Oldest first so the webhook receives history in chronological order.
+	sort.Slice(parsed, func(i, j int) bool {
+		return parsed[i].Info.Timestamp.Before(parsed[j].Info.Timestamp)
+	})
+
+	for _, msgEvt := range parsed {
+		s.handleMessageEvent(id, instance, msgEvt, eventMap)
+	}
+
+	zap.L().Info("history sync processed",
+		zap.String("instance", id),
+		zap.String("type", syncType.String()),
+		zap.Uint32("progress", e.Data.GetProgress()),
+		zap.Int("messages", len(parsed)),
+		zap.Int("skippedTooOld", skippedOld))
 }
 
 func (s *Whatsmiau) handleMessageDeleteEvent(id string, instance *models.Instance, e *events.Message, eventMap map[string]bool) {

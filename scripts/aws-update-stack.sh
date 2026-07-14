@@ -54,6 +54,8 @@ DB_MAX_ACU="${DB_MAX_ACU:-4}"
 DB_NAME="${DB_NAME:-whatsmiau}"
 DB_USERNAME="${DB_USERNAME:-whatsmiau}"
 DB_PUBLIC_ACCESS="${DB_PUBLIC_ACCESS:-false}"
+HISTORY_SYNC_ENABLED="${HISTORY_SYNC_ENABLED:-true}"
+HISTORY_SYNC_MAX_AGE_HOURS="${HISTORY_SYNC_MAX_AGE_HOURS:-24}"
 
 if [ -n "$DB_PASSWORD" ]; then
   DB_PASSWORD_PARAM="{\"ParameterKey\":\"DatabasePassword\",\"ParameterValue\":\"$(echo "$DB_PASSWORD" | sed 's/"/\\"/g')\"}"
@@ -75,6 +77,8 @@ cat <<EOF > "$CF_PARAMS_FILE"
   {"ParameterKey":"DatabaseName","ParameterValue":"$DB_NAME"},
   {"ParameterKey":"DatabaseUsername","ParameterValue":"$DB_USERNAME"},
   {"ParameterKey":"DatabasePublicAccess","ParameterValue":"$DB_PUBLIC_ACCESS"},
+  {"ParameterKey":"HistorySyncEnabled","ParameterValue":"$HISTORY_SYNC_ENABLED"},
+  {"ParameterKey":"HistorySyncMaxAgeHours","ParameterValue":"$HISTORY_SYNC_MAX_AGE_HOURS"},
   $DB_PASSWORD_PARAM
 ]
 EOF

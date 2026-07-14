@@ -49,6 +49,15 @@ Parameters:
     Default: "false"
     AllowedValues: ["true", "false"]
     Description: Set to true to allow public access to PostgreSQL (e.g. DBeaver from your PC). Less secure.
+  HistorySyncEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Emit history sync messages (e.g. missed while an instance was down) to the webhook as messages.upsert (deduped via Redis)
+  HistorySyncMaxAgeHours:
+    Type: String
+    Default: "24"
+    Description: Skip history sync messages older than this many hours (0 = no limit; max useful value 168 = dedup TTL)
 
 Conditions:
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
@@ -431,6 +440,10 @@ Resources:
                   DBName: !Ref DatabaseName
             - Name: API_KEY
               Value: !Ref ApiKey
+            - Name: HISTORY_SYNC_ENABLED
+              Value: !Ref HistorySyncEnabled
+            - Name: HISTORY_SYNC_MAX_AGE_HOURS
+              Value: !Ref HistorySyncMaxAgeHours
   BackendLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
