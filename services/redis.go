@@ -26,10 +26,19 @@ func Redis() *redis.Client {
 }
 
 func NewRedis() (*redis.Client, error) {
+	// The default pool is sized from GOMAXPROCS, which on a small Fargate task leaves ~10 connections
+	// for up to HANDLER_SEMAPHORE_SIZE concurrent event handlers: bursts then queue on the pool and
+	// blow the callers' context deadlines even while Redis itself is idle.
+	poolSize := env.Env.RedisPoolSize
+	if poolSize <= 0 {
+		poolSize = 100
+	}
+
 	opt := &redis.Options{
 		Addr:     env.Env.RedisURL,
 		Password: env.Env.RedisPassword,
 		DB:       0,
+		PoolSize: poolSize,
 	}
 
 	if env.Env.RedisTLS {

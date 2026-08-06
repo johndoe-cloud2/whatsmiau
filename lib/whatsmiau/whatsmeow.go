@@ -30,6 +30,15 @@ type ChatKeyCache struct {
 	RemoteLid string
 }
 
+// instanceCacheTTL is how long an instance read from Redis stays usable in memory.
+const instanceCacheTTL = 10 * time.Second
+
+// CachedInstance is an instance plus its own expiry, so lookups can age out entries inline.
+type CachedInstance struct {
+	Instance  models.Instance
+	ExpiresAt time.Time
+}
+
 type Whatsmiau struct {
 	clients          *xsync.Map[string, *whatsmeow.Client]
 	container        *sqlstore.Container
@@ -38,7 +47,7 @@ type Whatsmiau struct {
 	qrCache          *xsync.Map[string, string]
 	pairingCache     *xsync.Map[string, string]
 	observerRunning  *xsync.Map[string, *whatsmeow.Client]
-	instanceCache    *xsync.Map[string, models.Instance]
+	instanceCache    *xsync.Map[string, CachedInstance]
 	lockConnection   *xsync.Map[string, *sync.Mutex]
 	emitter          chan emitter
 	httpClient       *http.Client
@@ -162,7 +171,7 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 		repo:            repo,
 		qrCache:         xsync.NewMap[string, string](),
 		pairingCache:    xsync.NewMap[string, string](),
-		instanceCache:   xsync.NewMap[string, models.Instance](),
+		instanceCache:   xsync.NewMap[string, CachedInstance](),
 		observerRunning: xsync.NewMap[string, *whatsmeow.Client](),
 		lockConnection:  xsync.NewMap[string, *sync.Mutex](),
 		emitter:         make(chan emitter, env.Env.EmitterBufferSize),

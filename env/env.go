@@ -13,6 +13,8 @@ type E struct {
 	RedisURL      string `env:"REDIS_URL" envDefault:"localhost:6379"`
 	RedisPassword string `env:"REDIS_PASSWORD"`
 	RedisTLS      bool   `env:"REDIS_TLS" envDefault:"false"`
+	// RedisPoolSize: max connections to Redis; must cover the concurrent event handlers (0 = built-in default).
+	RedisPoolSize int `env:"REDIS_POOL_SIZE" envDefault:"0"`
 
 	ApiKey string `env:"API_KEY" envDefault:""`
 	// ECS/minimal: use sqlite3 and DB_URL=file:/app/data/data.db?_foreign_keys=on (Dockerfile has /app/data)

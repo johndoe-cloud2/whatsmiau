@@ -54,9 +54,9 @@ func (s *Whatsmiau) getInstance(id string) *models.Instance {
 }
 
 func (s *Whatsmiau) getInstanceCached(id string) *models.Instance {
-	instanceCached, ok := s.instanceCache.Load(id)
-	if ok {
-		return &instanceCached
+	cached, ok := s.instanceCache.Load(id)
+	if ok && time.Now().Before(cached.ExpiresAt) {
+		return &cached.Instance
 	}
 
 	ctx, c := context.WithTimeout(context.Background(), time.Second*5)
@@ -74,12 +74,10 @@ func (s *Whatsmiau) getInstanceCached(id string) *models.Instance {
 		return nil
 	}
 
-	s.instanceCache.Store(id, res[0])
-	go func() {
-		// expires in 10sec
-		time.Sleep(time.Second * 10)
-		s.instanceCache.Delete(id)
-	}()
+	// Expiry is carried on the entry rather than by a per-miss goroutine that sleeps then deletes:
+	// a history-sync burst produces thousands of misses at once, and those timers also raced,
+	// deleting entries a later miss had just refreshed.
+	s.instanceCache.Store(id, CachedInstance{Instance: res[0], ExpiresAt: time.Now().Add(instanceCacheTTL)})
 
 	return &res[0]
 }
