@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Test the *deployed* API (not local). Shows exactly what the router returns.
 # Usage: PROFILE=ases ./scripts/aws-api-test.sh
-#        PROFILE=foxy ./scripts/aws-api-test.sh
 # Optional: API_BASE_URL=https://whatsmiau.asesadmin.com  (default by profile)
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,11 +12,10 @@ ENV_FILE="$REPO_ROOT/.env.$AWS_PROFILE"
 [ ! -f "$ENV_FILE" ] && ENV_FILE="$REPO_ROOT/.env.production"
 [ -f "$ENV_FILE" ] && set -a && source "$ENV_FILE" && set +a
 
-# Base URL of the deployed API. Foxy has no cert on ALB by default → use HTTP; set API_BASE_URL=https://... if you use a TLS proxy.
+# Base URL of the deployed API. Set API_BASE_URL=https://... to override the per-profile default.
 if [ -z "$API_BASE_URL" ]; then
   case "$AWS_PROFILE" in
     ases)  API_BASE_URL="https://whatsmiau.asesadmin.com" ;;
-    foxy)  API_BASE_URL="http://whatsmiau.foxyadminbot.info" ;;
     *)     API_BASE_URL="http://localhost:8080" ;;
   esac
 fi

@@ -15,7 +15,7 @@ case "$ACTION" in
     ;;
 esac
 
-# Load env by profile: .env.ases / .env.foxy if they exist, otherwise .env.production
+# Load env by profile: .env.ases if it exists, otherwise .env.production
 source "$SCRIPT_DIR/aws-config.env" 2>/dev/null || true
 AWS_PROFILE="${AWS_PROFILE:-ases}"
 export AWS_PROFILE

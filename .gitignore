@@ -2,13 +2,11 @@
 .env
 .env.production
 .env.ases
-.env.foxy
 *.json
 !cloudformation/*.json
 *.db
 scripts/aws-config.env
 scripts/aws-infra.ases.env
-scripts/aws-infra.foxy.env
 TODO.md
 
 # Media files saved by the app when using LOCAL_MEDIA_PATH (folder is created, contents ignored)

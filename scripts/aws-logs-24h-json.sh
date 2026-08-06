@@ -11,7 +11,7 @@ OUTPUT="$LOGS_DIR/cloudwatch-24h-$(date +%Y%m%d-%H%M%S).json"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-for profile in ases foxy; do
+for profile in ases; do
   env_file="$REPO_ROOT/.env.$profile"
   [ -f "$env_file" ] || { echo "Warning: $env_file not found, skipping." >&2; continue; }
   export AWS_PROFILE="$profile"

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Shows the ALB DNS name to configure CNAME in IONOS (external domain).
+# Shows the ALB DNS name to configure the domain's CNAME record.
 # Usage: AWS_PROFILE=ases ./scripts/aws-domain-info.sh
-#        AWS_PROFILE=foxy ./scripts/aws-domain-info.sh
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -35,19 +34,18 @@ if [[ -z "$ALB_DNS" || "$ALB_DNS" != *".elb.amazonaws.com"* ]]; then
   exit 1
 fi
 
-# Suggested domain by profile (domain in IONOS, not in AWS)
+# Suggested domain by profile
 case "$AWS_PROFILE" in
   ases)  SUGGESTED_DOMAIN="whatsmiau.asesadmin.com" ;;
-  foxy)  SUGGESTED_DOMAIN="whatsmiau.foxyadminbot.info" ;;
-  *)     SUGGESTED_DOMAIN="whatsmiau.<your-domain-in-ionos>" ;;
+  *)     SUGGESTED_DOMAIN="whatsmiau.<your-domain>" ;;
 esac
 
 echo "Profile: $AWS_PROFILE"
 echo "Stack:   $STACK_NAME"
 echo ""
-echo "--- Values to configure the domain in IONOS ---"
+echo "--- Values to configure the domain ---"
 echo ""
-echo "In IONOS create a CNAME record:"
+echo "Create a CNAME record in your DNS provider (Route 53 for asesadmin.com):"
 echo "  Name (subdomain):  whatsmiau   (result: $SUGGESTED_DOMAIN)"
 echo "  Target / Value:    $ALB_DNS"
 echo ""

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Build both images once, then push to ECR and force ECS deploy for each profile (ases, foxy).
-# Uses .env.ases for ases and .env.foxy for foxy.
+# Build both images once, then push to ECR and force ECS deploy for each profile (ases).
+# Uses .env.ases for ases.
 # Usage: ./scripts/aws-push-prod.sh   or: make push-prod
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/aws-config.env" 2>/dev/null || true
 
-PROFILES="${AWS_PUSH_PROFILES:-ases foxy}"
+PROFILES="${AWS_PUSH_PROFILES:-ases}"
 LOCAL_BACKEND="whatsmiau-backend:build"
 LOCAL_ROUTER="whatsmiau-router:build"
 

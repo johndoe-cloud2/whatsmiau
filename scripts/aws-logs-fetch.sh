@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fetch CloudWatch logs de TODOS los servicios de esta API (router, backend y, si existe, Redis)
-# en los perfiles ASES y Foxy, para las últimas N horas.
+# en el perfil ASES, para las últimas N horas.
 #
 # Servicios en el stack: ECS router, ECS backend, ElastiCache Redis.
 # Solo router y backend tienen log groups en CloudWatch por defecto. Redis (ElastiCache)
@@ -11,7 +11,7 @@
 # Example: ./scripts/aws-logs-fetch.sh 2    # last 2 hours
 #          ./scripts/aws-logs-fetch.sh 24   # last 24 hours
 #
-# Requires: AWS CLI, .env.ases and .env.foxy with STACK_NAME and AWS_REGION.
+# Requires: AWS CLI, .env.ases with STACK_NAME and AWS_REGION.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,7 +27,7 @@ fi
 END_MS=$(($(date +%s) * 1000))
 START_MS=$((END_MS - HOURS * 3600 * 1000))
 
-PROFILES="${AWS_LOGS_PROFILES:-ases foxy}"
+PROFILES="${AWS_LOGS_PROFILES:-ases}"
 
 # Log groups que crea el CloudFormation de esta API (ECS)
 ECS_LOG_GROUPS="whatsmiau-router whatsmiau-backend"

@@ -1,6 +1,6 @@
 # Deploying Whatsmiau on AWS (single API with Router + ECS)
 
-This describes the minimal AWS setup: one public API (Router) that validates the API key (header `apikey`) and routes requests to the correct ECS backend using Redis. Hay dos perfiles: **ases** y **foxy**, cada uno con su propia infra y su archivo de entorno (`.env.ases`, `.env.foxy`).
+This describes the minimal AWS setup: one public API (Router) that validates the API key (header `apikey`) and routes requests to the correct ECS backend using Redis. Se usa un perfil: **ases**, con su propia infra y su archivo de entorno (`.env.ases`).
 
 ## Architecture
 
@@ -8,24 +8,22 @@ This describes the minimal AWS setup: one public API (Router) that validates the
 - **Redis**: Stores `route:<instance_id>` → backend URL and set `backends` (each backend registers on startup).
 - **Backends**: Whatsmiau API; shared PostgreSQL (RDS) for all tasks; `WEBHOOK_URL` for all events; on session loss, instance and route are removed and `session.lost` is sent to the webhook.
 
-## Perfiles: ases y foxy
+## Perfil: ases
 
-Cada perfil tiene su propia cuenta/rol AWS y su stack CloudFormation (mismo template). Se usan archivos de entorno separados:
+El perfil tiene su cuenta/rol AWS y su stack CloudFormation:
 
 | Perfil | Archivo env | Uso |
 |--------|-------------|-----|
 | ases   | `.env.ases` | Infra y deploy del entorno ases |
-| foxy   | `.env.foxy` | Infra y deploy del entorno foxy |
 
-Copia los ejemplos y rellena `API_KEY`, `WEBHOOK_URL`, y opcionalmente `ECR_REGISTRY` o `AWS_ACCOUNT_ID`:
+Copia el ejemplo y rellena `API_KEY`, `WEBHOOK_URL`, y opcionalmente `ECR_REGISTRY` o `AWS_ACCOUNT_ID`:
 
 ```sh
 cp .env.ases.example .env.ases
-cp .env.foxy.example .env.foxy
-# Edita .env.ases y .env.foxy (API_KEY, WEBHOOK_URL, AWS_PROFILE=ases/foxy, etc.)
+# Edita .env.ases (API_KEY, WEBHOOK_URL, AWS_PROFILE=ases, etc.)
 ```
 
-## Environment variables (por archivo .env.ases / .env.foxy)
+## Environment variables (archivo .env.ases)
 
 ### Router (ECS task)
 
@@ -58,62 +56,54 @@ cp .env.foxy.example .env.foxy
 
 ## Deploy steps (scripts + Makefile)
 
-### 1. Create infrastructure (first time) por perfil
+### 1. Create infrastructure (first time)
 
-Crea ECR y el stack CloudFormation (VPC, Redis, ECS, ALB) para el perfil indicado:
+Crea ECR y el stack CloudFormation (VPC, Redis, ECS, ALB):
 
 ```sh
 # Infra para ases (usa .env.ases)
 make infra-create PROFILE=ases
-
-# Infra para foxy (usa .env.foxy)
-make infra-create PROFILE=foxy
 ```
 
-### 2. Build, push y deploy en ambos perfiles (cada vez que cambies código)
+### 2. Build, push y deploy (cada vez que cambies código)
 
-Construye las imágenes una vez, luego hace push y fuerza el deploy ECS en **ases** y **foxy** (usando `.env.ases` y `.env.foxy`):
+Construye las imágenes una vez, luego hace push y fuerza el deploy ECS en **ases** (usando `.env.ases`):
 
 ```sh
 make push-prod
 # o: ./scripts/aws-push-prod.sh
 ```
 
-Requiere que existan `.env.ases` y `.env.foxy`. Para desplegar solo en un perfil puedes usar `AWS_PUSH_PROFILES=ases ./scripts/aws-push-prod.sh` (o solo `foxy`).
+Requiere que exista `.env.ases`.
 
-Importante: antes de `infra-create`, crea `scripts/aws-infra.ases.env` y/o `scripts/aws-infra.foxy.env` a partir de los ejemplos y define `DB_PASSWORD`.
+Importante: antes de `infra-create`, crea `scripts/aws-infra.ases.env` a partir del ejemplo y define `DB_PASSWORD`.
 
 ### 3. Update infrastructure (template o parámetros)
 
-Tras cambiar `cloudformation/template.yaml` o parámetros, actualiza el stack del perfil que toque:
+Tras cambiar `cloudformation/template.yaml` o parámetros, actualiza el stack:
 
 ```sh
 make infra-update PROFILE=ases
-make infra-update PROFILE=foxy
 ```
 
 ### 4. Delete stack
 
 ```sh
 make infra-destroy PROFILE=ases
-make infra-destroy PROFILE=foxy
 ```
 
-### 5. API endpoint y dominio (IONOS)
+### 5. API endpoint y dominio (Route 53)
 
-El dominio está en IONOS (no en AWS). Para **ases** la API se expone en `whatsmiau.asesadmin.com`; para **foxy** usas el dominio que tengas en IONOS. En ambos casos configuras un CNAME en IONOS apuntando al ALB.
+El dominio `asesadmin.com` está en AWS (Route 53). Para **ases** la API se expone en `whatsmiau.asesadmin.com`, con un registro que apunta al ALB.
 
-Obtener el nombre del ALB (destino del CNAME):
+Obtener el nombre del ALB:
 
 ```sh
 # Valores para ases (dominio whatsmiau.asesadmin.com)
 make domain-info PROFILE=ases
-
-# Valores para foxy
-make domain-info PROFILE=foxy
 ```
 
-Ver [docs/dominio-ionos.md](../docs/dominio-ionos.md) para configurar el CNAME en IONOS.
+Ver [docs/dominio.md](../docs/dominio.md) para configurar el registro DNS.
 
 Llamar a la API (por ALB o por dominio cuando esté configurado):
 
