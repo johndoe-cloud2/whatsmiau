@@ -79,6 +79,34 @@ func cleanupDeadBackends(redisRepo *instances.RedisInstance) {
 	}
 }
 
+// claimRoutes points route:<instanceID> at this backend for every instance this task loaded.
+// A task replacement changes the backend IP, and route:* keys are written only on create/connect,
+// so without this they keep pointing at the dead task until a request fails with 502 and the router
+// drops the route. Claiming them on startup keeps the routing table matching reality.
+func claimRoutes(redisRepo *instances.RedisInstance) {
+	miau := whatsmiau.Get()
+	if miau == nil {
+		return
+	}
+
+	ids := miau.OwnedInstanceIDs()
+	if len(ids) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	written, err := redisRepo.SetRoutesForBackend(ctx, ids, env.Env.BackendPublicURL)
+	if err != nil {
+		zap.L().Warn("failed to claim routes in Redis", zap.Error(err), zap.Int("instances", len(ids)))
+		return
+	}
+
+	zap.L().Info("claimed routes for loaded instances",
+		zap.Int("count", written), zap.String("url", env.Env.BackendPublicURL))
+}
+
 func main() {
 	if err := env.Load(); err != nil {
 		panic(err)
@@ -103,6 +131,9 @@ func main() {
 		} else {
 			zap.L().Info("registered backend in Redis", zap.String("url", env.Env.BackendPublicURL))
 		}
+
+		// Take ownership of the instances loaded above so the router stops proxying them to the previous task.
+		claimRoutes(redisRepo)
 		// On SIGTERM/SIGINT (e.g. ECS stop), unregister and delete routes so the router stops proxying to this task.
 		go func() {
 			sig := make(chan os.Signal, 1)

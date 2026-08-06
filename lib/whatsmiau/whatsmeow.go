@@ -198,6 +198,18 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 
 }
 
+// OwnedInstanceIDs returns the IDs of the instances this process holds a WhatsApp client for.
+// LoadMiau connects every device in the store, so this is the full set this task serves.
+func (s *Whatsmiau) OwnedInstanceIDs() []string {
+	ids := make([]string, 0, s.clients.Size())
+	s.clients.Range(func(id string, _ *whatsmeow.Client) bool {
+		ids = append(ids, id)
+		return true
+	})
+
+	return ids
+}
+
 func (s *Whatsmiau) Connect(ctx context.Context, id string, phoneNumber string) (qrCode string, pairingCode string, err error) {
 	client, err := s.generateClient(ctx, id)
 	if err != nil {

@@ -282,6 +282,38 @@ func (s *RedisInstance) SetRoute(ctx context.Context, instanceID, backendURL str
 	return s.db.Set(ctx, redisKeyRoutePrefix+instanceID, backendURL, redis.KeepTTL).Err()
 }
 
+// SetRoutesForBackend points route:<id> at backendURL for every given instance ID, in one pipeline.
+// Call it on startup: the task that owns the instances claims them, so a route never keeps pointing
+// at the IP of a task that no longer exists (which the router can only discover by failing a request).
+// Returns the number of routes written.
+func (s *RedisInstance) SetRoutesForBackend(ctx context.Context, instanceIDs []string, backendURL string) (int, error) {
+	if backendURL == "" || len(instanceIDs) == 0 {
+		return 0, nil
+	}
+
+	pipe := s.db.Pipeline()
+	for _, id := range instanceIDs {
+		if id == "" {
+			continue
+		}
+		pipe.Set(ctx, redisKeyRoutePrefix+id, backendURL, redis.KeepTTL)
+	}
+
+	cmds, err := pipe.Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	written := 0
+	for _, cmd := range cmds {
+		if cmd.Err() == nil {
+			written++
+		}
+	}
+
+	return written, nil
+}
+
 // DeleteRoute removes route:<instanceID> (e.g. when session is lost).
 func (s *RedisInstance) DeleteRoute(ctx context.Context, instanceID string) error {
 	if instanceID == "" {
