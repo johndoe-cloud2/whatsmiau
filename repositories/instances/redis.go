@@ -128,20 +128,33 @@ func (s *RedisInstance) Update(ctx context.Context, id string, toUpdate *models.
 }
 
 func (s *RedisInstance) List(ctx context.Context, id string) ([]models.Instance, error) {
+	// Redis applies SCAN's MATCH after walking the keyspace, so scanning for a single exact key
+	// still costs a full pass (keyspace/COUNT round-trips). Fetch it directly instead: this runs
+	// on every WhatsApp event via getInstanceCached.
+	if len(id) > 0 {
+		raw, err := s.db.Get(ctx, s.key(id)).Result()
+		if errors.Is(err, redis.Nil) {
+			return []models.Instance{}, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		var inst models.Instance
+		if err := json.Unmarshal([]byte(raw), &inst); err != nil {
+			return []models.Instance{}, nil
+		}
+
+		return []models.Instance{inst}, nil
+	}
+
 	var (
 		cursor uint64
 		keys   []string
 	)
 
-	pattern := "instance_"
-	if len(id) > 0 {
-		pattern = fmt.Sprintf("instance_%s", id)
-	} else {
-		pattern += "*"
-	}
-
 	for {
-		batch, newCursor, err := s.db.Scan(ctx, cursor, pattern, 100).Result()
+		batch, newCursor, err := s.db.Scan(ctx, cursor, "instance_*", 100).Result()
 		if err != nil {
 			return nil, err
 		}

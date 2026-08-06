@@ -38,7 +38,11 @@ func (s *Whatsmiau) getInstance(id string) *models.Instance {
 
 	res, err := s.repo.List(ctx, id)
 	if err != nil {
-		zap.L().Panic("failed to get instanceCached by instance", zap.Error(err))
+		// Runs inside event-handler goroutines, where echo's Recover middleware cannot reach:
+		// panicking here would kill the process and every live WhatsApp session with it.
+		// Callers all treat nil as "not found", so degrade instead.
+		zap.L().Error("failed to get instance by id", zap.String("instance", id), zap.Error(err))
+		return nil
 	}
 
 	if len(res) == 0 {
@@ -60,7 +64,9 @@ func (s *Whatsmiau) getInstanceCached(id string) *models.Instance {
 
 	res, err := s.repo.List(ctx, id)
 	if err != nil {
-		zap.L().Panic("failed to get instanceCached by instance", zap.Error(err))
+		// Same as getInstance: a transient Redis timeout must not take the whole backend down.
+		zap.L().Error("failed to get instanceCached by instance", zap.String("instance", id), zap.Error(err))
+		return nil
 	}
 
 	if len(res) == 0 {
