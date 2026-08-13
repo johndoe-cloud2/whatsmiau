@@ -591,8 +591,10 @@ func (s *Whatsmiau) Disconnect(id string) error {
 }
 
 // DisconnectClient closes only the WebSocket for an instance without deleting session data.
-// whatsmeow will attempt automatic reconnection. Use when the session may recover (e.g. WA error 463)
-// rather than on permanent logout. The Disconnected event fires the connection.update:close webhook.
+// whatsmeow will attempt automatic reconnection. Use only when the socket itself is suspect,
+// never as a reaction to a WhatsApp-side send rejection such as error 463: dropping the socket
+// aborts the in-flight privacy-token issuance and makes the next send fail the same way.
+// The Disconnected event fires the connection.update:close webhook.
 func (s *Whatsmiau) DisconnectClient(id string) {
 	client, ok := s.clients.Load(id)
 	if !ok {

@@ -86,9 +86,15 @@ func (s *Message) SendText(ctx echo.Context) error {
 	res, err := s.whatsmiau.SendText(c, sendText)
 	if err != nil {
 		zap.L().Error("Whatsmiau.SendText failed", zap.Error(err))
+		// 463 (NackCallerReachoutTimelocked) is a WhatsApp-side rejection, not a broken socket.
+		// Do NOT disconnect: the fire-and-forget issuePrivacyTokenAndSave goroutine that whatsmeow
+		// starts after the send is what obtains the tctoken for the next attempt, and tearing down
+		// the websocket kills it ("websocket disconnected before info query returned response"),
+		// so the contact stays token-less and every retry fails the same way.
 		if strings.Contains(err.Error(), "server returned error 463") {
-			zap.L().Warn("WhatsApp error 463: disconnecting instance for recovery", zap.String("instance", request.InstanceID))
-			go s.whatsmiau.DisconnectClient(request.InstanceID)
+			zap.L().Warn("WhatsApp error 463: reachout timelocked, keeping session alive",
+				zap.String("instance", request.InstanceID), zap.String("to", jid.String()))
+			return utils.HTTPFail(ctx, http.StatusTooManyRequests, err, "reachout timelocked")
 		}
 		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to send text")
 	}
