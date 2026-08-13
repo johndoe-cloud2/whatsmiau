@@ -422,10 +422,37 @@ func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string, phone
 		select {
 		case <-ctx.Done(): // QR code expiration
 			zap.L().Debug("context ", zap.String("id", id), zap.Error(ctx.Err()))
+			// Only tear down when the registry still points at OUR client. The panel polls
+			// /connect every ~2s while the QR screen is open, and every poll that gets a
+			// freshly built client starts another observer with its own 2-minute deadline.
+			// Those stale observers fire long after someone actually scanned, and deleting
+			// the entry unconditionally evicted the healthy, just-paired client: its socket
+			// stayed alive and kept firing events (so incoming messages still reached the
+			// webhook and users got created), while every send answered "client is nil".
+			if current, ok := s.clients.Load(id); !ok || current != client {
+				zap.L().Debug("QR expired for a superseded client, leaving the live one alone",
+					zap.String("id", id))
+				return
+			}
+			// The device may have paired through another path (e.g. the 515 restart) after
+			// this observer armed its deadline. Expiring a QR nobody needed is not a reason
+			// to hard logout a working session.
+			if client.IsLoggedIn() {
+				zap.L().Debug("QR expired but device is already paired, keeping session",
+					zap.String("id", id))
+				return
+			}
 			if err := s.deleteDeviceIfExists(context.TODO(), client); err != nil {
 				zap.L().Error("failed to hard logout", zap.String("id", id), zap.Error(err))
 			}
-			s.clients.Delete(id)
+			// Compare-and-delete: another goroutine may have replaced the client while we
+			// were logging out, and that replacement must survive.
+			s.clients.Compute(id, func(existing *whatsmeow.Client, loaded bool) (*whatsmeow.Client, xsync.ComputeOp) {
+				if !loaded || existing != client {
+					return existing, xsync.CancelOp
+				}
+				return existing, xsync.DeleteOp
+			})
 			return
 		case evt, ok := <-qrChan:
 			if !ok || evt.Event == "error" || evt.Event == "timeout" { // closed qr chan
