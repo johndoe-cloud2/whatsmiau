@@ -56,6 +56,10 @@ type Whatsmiau struct {
 	handlerSemaphore chan struct{}
 	// chatKeyCache: key "instanceID:lid" -> ChatKeyCache, so we can resolve LID to remoteJid when an event has no remoteJid.
 	chatKeyCache *xsync.Map[string, ChatKeyCache]
+	// liveSince: instance id -> moment the current connection came up. Messages stamped
+	// before it are offline backlog (queued by WhatsApp while we were disconnected) and are
+	// not sent to the webhook. Absent = not connected, so every message is dropped.
+	liveSince *xsync.Map[string, time.Time]
 	// outdatedRecovery guards the 405 ClientOutdated recovery so only one runs at a time.
 	outdatedRecovery atomic.Bool
 }
@@ -63,9 +67,10 @@ type Whatsmiau struct {
 // newWAClient creates a whatsmeow client with the settings every whatsmiau client needs.
 func newWAClient(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
 	client := whatsmeow.NewClient(device, logger)
-	// Only auto-download history sync blobs when enabled; the emitter turns them into
-	// webhook events (see handleHistorySyncEvent). Otherwise notifications are ignored.
-	client.ManualHistorySyncDownload = !env.Env.HistorySyncEnabled
+	// History sync is never downloaded nor sent to the webhook: only messages received
+	// while the session is connected matter (see liveSince). The notification is still
+	// acknowledged so the phone does not keep re-sending it.
+	client.ManualHistorySyncDownload = true
 	// Ask the primary phone to re-send messages that arrive undecryptable/unavailable
 	// (broken Signal session): the recovered message is dispatched as a normal Message event.
 	client.AutomaticMessageRerequestFromPhone = true
@@ -184,6 +189,7 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 		fileStorage:      storage,
 		handlerSemaphore: make(chan struct{}, env.Env.HandlerSemaphoreSize),
 		chatKeyCache:     xsync.NewMap[string, ChatKeyCache](),
+		liveSince:        xsync.NewMap[string, time.Time](),
 	}
 
 	go instance.startEmitter()
