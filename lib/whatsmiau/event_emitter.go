@@ -388,13 +388,19 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 		// Track the live window synchronously, in dispatch order, before the async handling.
 		switch e := evt.(type) {
 		case *events.Connected:
-			// WhatsApp timestamps have second precision: truncate so a live message received
-			// in the same second as the connection is not mistaken for backlog.
-			s.liveSince.Store(id, time.Now().Truncate(time.Second))
+			s.openLiveWindow(id)
+		case *events.PairSuccess:
+			s.resetLiveHistory(id)
 		case *events.Disconnected, *events.ConnectFailure, *events.LoggedOut, *events.StreamReplaced, *events.TemporaryBan:
-			s.liveSince.Delete(id)
+			s.closeLiveWindow(id)
 		case *events.Message:
-			if !s.isLiveMessage(id, e) {
+			// History sync notifications come from our own phone: download and filter them
+			// through the backlog policy instead of treating them as a chat message.
+			if notif := e.Message.GetProtocolMessage().GetHistorySyncNotification(); notif != nil {
+				go s.handleHistorySyncNotification(id, notif)
+				return
+			}
+			if !s.shouldDeliverMessage(id, e) {
 				return
 			}
 		}
@@ -482,23 +488,6 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 			}
 		}()
 	}
-}
-
-// isLiveMessage reports whether the message reached us while the session was connected.
-// Offline backlog (messages WhatsApp queued while we were disconnected and delivers right
-// after reconnecting) is stamped before liveSince and is dropped, like history sync.
-func (s *Whatsmiau) isLiveMessage(id string, e *events.Message) bool {
-	since, ok := s.liveSince.Load(id)
-	if ok && !e.Info.Timestamp.Before(since) {
-		return true
-	}
-	zap.L().Info("dropping message received outside live connection",
-		zap.String("instance", id),
-		zap.String("messageId", e.Info.ID),
-		zap.Time("messageTimestamp", e.Info.Timestamp),
-		zap.Bool("connected", ok),
-		zap.Time("liveSince", since))
-	return false
 }
 
 func (s *Whatsmiau) handleConnected(id string, instance *models.Instance) {

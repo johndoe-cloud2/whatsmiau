@@ -403,3 +403,47 @@ func (s *RedisInstance) DeleteEmittedMessagesForInstance(ctx context.Context, in
 	}
 	return nil
 }
+
+// liveLastTTL bounds how long the "last live" mark survives. Only gaps shorter than the
+// backlog window matter, so a day is plenty and keeps dead instances from leaving keys.
+const liveLastTTL = 24 * time.Hour
+
+func (s *RedisInstance) keyLiveLast(id string) string {
+	return fmt.Sprintf("instance_%s_live_last", id)
+}
+
+// SetLiveLast records, for each instance, the last moment its WhatsApp session was known
+// to be connected. Stored in Redis so it survives deploys and moves between backends.
+func (s *RedisInstance) SetLiveLast(ctx context.Context, ids []string, at time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	pipe := s.db.Pipeline()
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		pipe.Set(ctx, s.keyLiveLast(id), at.Unix(), liveLastTTL)
+	}
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// GetLiveLast returns the last moment the instance was known to be connected.
+// ok is false when there is no mark (never connected, freshly paired or expired).
+func (s *RedisInstance) GetLiveLast(ctx context.Context, id string) (at time.Time, ok bool, err error) {
+	val, err := s.db.Get(ctx, s.keyLiveLast(id)).Int64()
+	if errors.Is(err, redis.Nil) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return time.Unix(val, 0), true, nil
+}
+
+// DeleteLiveLast forgets the instance's last live mark (e.g. after a fresh QR pairing,
+// so nothing that happened before the scan is treated as recoverable backlog).
+func (s *RedisInstance) DeleteLiveLast(ctx context.Context, id string) error {
+	return s.db.Del(ctx, s.keyLiveLast(id)).Err()
+}
