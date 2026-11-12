@@ -56,10 +56,6 @@ type Whatsmiau struct {
 	handlerSemaphore chan struct{}
 	// chatKeyCache: key "instanceID:lid" -> ChatKeyCache, so we can resolve LID to remoteJid when an event has no remoteJid.
 	chatKeyCache *xsync.Map[string, ChatKeyCache]
-	// liveWindows: instance id -> current connection window. Decides which messages
-	// stamped before the connection (offline queue, history sync) still reach the webhook.
-	// See live_window.go.
-	liveWindows *xsync.Map[string, *liveWindow]
 	// outdatedRecovery guards the 405 ClientOutdated recovery so only one runs at a time.
 	outdatedRecovery atomic.Bool
 }
@@ -67,10 +63,9 @@ type Whatsmiau struct {
 // newWAClient creates a whatsmeow client with the settings every whatsmiau client needs.
 func newWAClient(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
 	client := whatsmeow.NewClient(device, logger)
-	// History sync blobs are downloaded by us only when the connection may recover backlog
-	// (see handleHistorySyncNotification). The notification is still acknowledged so the
-	// phone does not keep re-sending it.
-	client.ManualHistorySyncDownload = true
+	// Only auto-download history sync blobs when enabled; the emitter turns them into
+	// webhook events (see handleHistorySyncEvent). Otherwise notifications are ignored.
+	client.ManualHistorySyncDownload = !env.Env.HistorySyncEnabled
 	// Ask the primary phone to re-send messages that arrive undecryptable/unavailable
 	// (broken Signal session): the recovered message is dispatched as a normal Message event.
 	client.AutomaticMessageRerequestFromPhone = true
@@ -189,13 +184,11 @@ func LoadMiau(ctx context.Context, container *sqlstore.Container) {
 		fileStorage:      storage,
 		handlerSemaphore: make(chan struct{}, env.Env.HandlerSemaphoreSize),
 		chatKeyCache:     xsync.NewMap[string, ChatKeyCache](),
-		liveWindows:      xsync.NewMap[string, *liveWindow](),
 	}
 
 	go instance.startEmitter()
 	go instance.runStaleInstancesCleanup()
 	go instance.runWAVersionRefresher()
-	go instance.runLiveHeartbeat()
 
 	clients.Range(func(id string, client *whatsmeow.Client) bool {
 		zap.L().Info("starting event handler", zap.String("jid", client.Store.ID.String()))
@@ -495,8 +488,6 @@ func (s *Whatsmiau) observeConnection(client *whatsmeow.Client, id string, phone
 				}
 
 				zap.L().Info("device connected successfully", zap.String("id", id))
-				// Fresh pairing: nothing from before the scan is recoverable backlog.
-				s.resetLiveHistory(id)
 				client.RemoveEventHandlers()
 				client.AddEventHandler(s.Handle(id))
 				if _, err := s.repo.Update(context.Background(), id, &models.Instance{

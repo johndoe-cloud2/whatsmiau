@@ -79,30 +79,6 @@ func cleanupDeadBackends(redisRepo *instances.RedisInstance) {
 	}
 }
 
-// backendHeartbeatInterval is how often a running backend re-adds itself to the Redis "backends" set.
-const backendHeartbeatInterval = 30 * time.Second
-
-// keepBackendRegistered re-adds this backend to the "backends" set on every tick until ctx is cancelled.
-// Registration used to happen only once at startup, so any SREM by someone else (another task's startup
-// cleanup, the router dropping a backend after one proxy error) left a live backend unregistered for
-// good: the router then answered every create/list with 503 "No backend available" until a redeploy.
-func keepBackendRegistered(ctx context.Context, redisRepo *instances.RedisInstance) {
-	ticker := time.NewTicker(backendHeartbeatInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			if err := redisRepo.RegisterBackend(opCtx, env.Env.BackendPublicURL); err != nil && ctx.Err() == nil {
-				zap.L().Warn("failed to refresh backend registration in Redis", zap.Error(err))
-			}
-			cancel()
-		}
-	}
-}
-
 // claimRoutes points route:<instanceID> at this backend for every instance this task loaded.
 // A task replacement changes the backend IP, and route:* keys are written only on create/connect,
 // so without this they keep pointing at the dead task until a request fails with 502 and the router
@@ -158,15 +134,12 @@ func main() {
 
 		// Take ownership of the instances loaded above so the router stops proxying them to the previous task.
 		claimRoutes(redisRepo)
-		heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
-		go keepBackendRegistered(heartbeatCtx, redisRepo)
 		// On SIGTERM/SIGINT (e.g. ECS stop), unregister and delete routes so the router stops proxying to this task.
 		go func() {
 			sig := make(chan os.Signal, 1)
 			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 			<-sig
 			zap.L().Info("shutdown signal received, unregistering backend from Redis")
-			stopHeartbeat()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if n, err := redisRepo.DeleteRoutesForBackend(ctx, env.Env.BackendPublicURL); err != nil {
