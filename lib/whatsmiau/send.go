@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -13,16 +12,32 @@ import (
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
 
+type Quote struct {
+	MessageID   string
+	Message     string
+	Participant *types.JID
+}
+
 type SendText struct {
-	Text           string     `json:"text"`
-	InstanceID     string     `json:"instance_id"`
-	RemoteJID      *types.JID `json:"remote_jid"`
-	QuoteMessageID string     `json:"quote_message_id"`
-	QuoteMessage   string     `json:"quote_message"`
-	Participant    *types.JID `json:"participant"`
+	Text             string     `json:"text"`
+	InstanceID       string     `json:"instance_id"`
+	RemoteJID        *types.JID `json:"remote_jid"`
+	Quote            *Quote     `json:"quote,omitempty"`
+	LinkPreview      bool       `json:"linkPreview,omitempty"`
+	MentionsEveryOne bool       `json:"mentionsEveryOne,omitempty"`
+	Mentioned        []string   `json:"mentioned,omitempty"`
+
+	// Caller-supplied card metadata; when set, the page is not fetched.
+	LinkPreviewImage       string `json:"linkPreviewImage,omitempty"`
+	LinkPreviewTitle       string `json:"linkPreviewTitle,omitempty"`
+	LinkPreviewDescription string `json:"linkPreviewDescription,omitempty"`
+	LinkPreviewLarge       *bool  `json:"linkPreviewLarge,omitempty"`
+
+	linkPreviewInfo *linkPreviewInfo
 }
 
 type SendTextResponse struct {
@@ -43,32 +58,36 @@ func (s *Whatsmiau) SendText(ctx context.Context, data *SendText) (*SendTextResp
 	resolved := s.resolveJID(ctx, client, *data.RemoteJID)
 	data.RemoteJID = &resolved
 
-	//rJid := data.RemoteJID.ToNonAD().String()
-	var extendedMessage *waE2E.ExtendedTextMessage
-	if len(data.QuoteMessage) > 0 && len(data.QuoteMessageID) > 0 {
-		extendedMessage = &waE2E.ExtendedTextMessage{
-			//ContextInfo: &waE2E.ContextInfo{ // TODO: implement quoted message
-			//	StanzaID:    &data.QuoteMessageID,
-			//	Participant: &rJid,
-			//	QuotedMessage: &waE2E.Message{
-			//		Conversation: &data.QuoteMessage,
-			//		ProtocolMessage: &waE2E.ProtocolMessage{
-			//			Key: &waCommon.MessageKey{
-			//				RemoteJID:   &rJid,
-			//				FromMe:      &[]bool{true}[0],
-			//				ID:          &data.QuoteMessageID,
-			//				Participant: nil,
-			//			},
-			//		},
-			//	},
-			//},
+	mentioned, everyone, err := s.resolveMentions(resolved, data.MentionsEveryOne, data.Mentioned)
+	if err != nil {
+		return nil, err
+	}
+
+	if data.LinkPreview {
+		// Without the HQ upload, clients render the small card.
+		uploadClient := client
+		if !data.largeLinkPreview() {
+			uploadClient = nil
+		}
+
+		var preview *linkPreviewInfo
+		var previewErr error
+		if data.hasCustomLinkPreview() {
+			preview, previewErr = s.buildCustomLinkPreview(ctx, data, uploadClient)
+		} else {
+			preview, previewErr = s.fetchLinkPreview(ctx, data.Text, uploadClient)
+		}
+		if previewErr != nil {
+			zap.L().Warn("link preview fetch failed, sending plain text", zap.Error(previewErr))
+		} else {
+			data.linkPreviewInfo = preview
 		}
 	}
 
-	res, err := client.SendMessage(ctx, *data.RemoteJID, &waE2E.Message{
-		Conversation:        &data.Text,
-		ExtendedTextMessage: extendedMessage,
-	})
+	// mentionsEveryOne uses the classic E2E path with ContextInfo.NonJIDMentions=1
+	// (same approach mautrix-whatsapp uses for @room). The message body must
+	// contain the literal "@all" for the client to render the highlight.
+	res, err := client.SendMessage(ctx, *data.RemoteJID, buildSendTextMessage(data, mentioned, everyone))
 	if err != nil {
 		return nil, err
 	}
@@ -79,13 +98,173 @@ func (s *Whatsmiau) SendText(ctx context.Context, data *SendText) (*SendTextResp
 	}, nil
 }
 
+func buildContextInfo(q *Quote, mentionedJID []string, everyone bool) *waE2E.ContextInfo {
+	var ci *waE2E.ContextInfo
+	if q != nil && len(q.MessageID) > 0 {
+		ci = &waE2E.ContextInfo{
+			StanzaID: proto.String(q.MessageID),
+		}
+		if q.Participant != nil {
+			ci.Participant = proto.String(q.Participant.String())
+		}
+		if len(q.Message) > 0 {
+			ci.QuotedMessage = &waE2E.Message{
+				Conversation: proto.String(q.Message),
+			}
+		}
+	}
+	if everyone {
+		if ci == nil {
+			ci = &waE2E.ContextInfo{}
+		}
+		ci.NonJIDMentions = proto.Uint32(1)
+	}
+	if len(mentionedJID) > 0 {
+		if ci == nil {
+			ci = &waE2E.ContextInfo{}
+		}
+		ci.MentionedJID = mentionedJID
+	}
+	return ci
+}
+
+func buildSendTextMessage(data *SendText, mentionedJID []string, everyone bool) *waE2E.Message {
+	ci := buildContextInfo(data.Quote, mentionedJID, everyone)
+
+	// Link preview: the message must always go through ExtendedTextMessage with
+	// the fetched page metadata attached (matchedText/title/description/thumbnail).
+	if data.linkPreviewInfo != nil {
+		ext := &waE2E.ExtendedTextMessage{
+			Text:          proto.String(data.Text),
+			MatchedText:   proto.String(data.linkPreviewInfo.url),
+			Title:         proto.String(data.linkPreviewInfo.title),
+			Description:   proto.String(data.linkPreviewInfo.description),
+			PreviewType:   waE2E.ExtendedTextMessage_NONE.Enum(),
+			JPEGThumbnail: data.linkPreviewInfo.thumbnail,
+			ContextInfo:   ci,
+		}
+
+		// High-quality card image: when the original image was uploaded, point
+		// clients at it so they render the big card (attached image + site
+		// title/description) instead of the small link-text card.
+		if data.linkPreviewInfo.hqDirectPath != "" {
+			ext.ThumbnailDirectPath = proto.String(data.linkPreviewInfo.hqDirectPath)
+			ext.ThumbnailSHA256 = data.linkPreviewInfo.hqSHA256
+			ext.ThumbnailEncSHA256 = data.linkPreviewInfo.hqEncSHA256
+			ext.MediaKey = data.linkPreviewInfo.hqMediaKey
+			ext.MediaKeyTimestamp = proto.Int64(data.linkPreviewInfo.hqMediaKeyTs)
+			ext.ThumbnailWidth = proto.Uint32(uint32(data.linkPreviewInfo.hqWidth))
+			ext.ThumbnailHeight = proto.Uint32(uint32(data.linkPreviewInfo.hqHeight))
+		}
+
+		return &waE2E.Message{ExtendedTextMessage: ext}
+	}
+
+	if ci == nil {
+		return &waE2E.Message{
+			Conversation: proto.String(data.Text),
+		}
+	}
+
+	return &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text:        proto.String(data.Text),
+			ContextInfo: ci,
+		},
+	}
+}
+
+type EditMessageKey struct {
+	ID          string
+	RemoteJID   string
+	FromMe      bool
+	Participant string
+}
+
+type UpdateMessage struct {
+	Text       string          `json:"text"`
+	InstanceID string          `json:"instance_id"`
+	RemoteJID  *types.JID      `json:"remote_jid"`
+	Key        *EditMessageKey `json:"key"`
+}
+
+type UpdateMessageResponse struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (s *Whatsmiau) UpdateMessage(ctx context.Context, data *UpdateMessage) (*UpdateMessageResponse, error) {
+	client, ok := s.clients.Load(data.InstanceID)
+	if !ok {
+		return nil, whatsmeow.ErrClientIsNil
+	}
+	if client.Store == nil || client.Store.ID == nil {
+		return nil, fmt.Errorf("device is not connected")
+	}
+	if data.RemoteJID == nil {
+		return nil, fmt.Errorf("remote_jid is required")
+	}
+	if data.Key == nil || len(data.Key.ID) == 0 {
+		return nil, fmt.Errorf("key.id is required")
+	}
+
+	chat := s.resolveJID(ctx, client, *data.RemoteJID)
+
+	res, err := client.SendMessage(ctx, chat, client.BuildEdit(chat, types.MessageID(data.Key.ID), &waE2E.Message{
+		Conversation: proto.String(data.Text),
+	}))
+	if err != nil {
+		return nil, err
+	}
+
+	return &UpdateMessageResponse{
+		ID:        res.ID,
+		CreatedAt: res.Timestamp,
+	}, nil
+}
+
+// resolveMentions builds the mention metadata for a message. mentionsEveryOne
+// only applies to group chats and uses the native "@everyone" mechanism
+// (ContextInfo.NonJIDMentions = 1), the same approach mautrix-whatsapp uses
+// for @room bridging. mentioned is a list of phone numbers (or full JIDs) to
+// mention individually via ContextInfo.MentionedJID. The message text is left
+// untouched — mentions are delivered via ContextInfo.
+func (s *Whatsmiau) resolveMentions(remoteJID types.JID, mentionsEveryOne bool, mentioned []string) ([]string, bool, error) {
+	var jids []string
+	if len(mentioned) > 0 {
+		jids = make([]string, 0, len(mentioned))
+		for _, m := range mentioned {
+			if !strings.Contains(m, "@") {
+				m += "@" + types.DefaultUserServer
+			}
+			jid, err := types.ParseJID(m)
+			if err != nil {
+				return nil, false, fmt.Errorf("invalid mentioned jid %q: %w", m, err)
+			}
+			jids = append(jids, jid.String())
+		}
+		zap.L().Info("mentioned resolved", zap.String("remote", remoteJID.String()), zap.Strings("mentionedJid", jids))
+	}
+
+	// mentionsEveryOne only applies to group chats: it uses the native
+	// "@everyone" mechanism (ContextInfo.NonJIDMentions = 1), the same approach
+	// mautrix-whatsapp uses for @room bridging. For any other destination it is
+	// ignored (there is no group to mention everyone in). mentioned is processed
+	// independently and can be combined with mentionsEveryOne.
+	everyone := mentionsEveryOne && remoteJID.Server == types.GroupServer
+	if everyone {
+		zap.L().Info("mentionsEveryOne resolved", zap.String("group", remoteJID.String()), zap.Bool("nonJidMentions", true))
+	}
+	return jids, everyone, nil
+}
+
 type SendAudioRequest struct {
-	AudioURL       string     `json:"text"`
-	InstanceID     string     `json:"instance_id"`
-	RemoteJID      *types.JID `json:"remote_jid"`
-	QuoteMessageID string     `json:"quote_message_id"`
-	QuoteMessage   string     `json:"quote_message"`
-	Participant    *types.JID `json:"participant"`
+	AudioURL         string     `json:"text"`
+	InstanceID       string     `json:"instance_id"`
+	RemoteJID        *types.JID `json:"remote_jid"`
+	Quote            *Quote     `json:"quote,omitempty"`
+	MentionsEveryOne bool       `json:"mentionsEveryOne,omitempty"`
+	Mentioned        []string   `json:"mentioned,omitempty"`
 }
 
 type SendAudioResponse struct {
@@ -103,12 +282,7 @@ func (s *Whatsmiau) SendAudio(ctx context.Context, data *SendAudioRequest) (*Sen
 		return nil, fmt.Errorf("remote_jid is required")
 	}
 
-	resAudio, err := s.getCtx(ctx, data.AudioURL)
-	if err != nil {
-		return nil, err
-	}
-
-	dataBytes, err := io.ReadAll(resAudio.Body)
+	dataBytes, err := s.fetchBytes(ctx, data.AudioURL)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +313,12 @@ func (s *Whatsmiau) SendAudio(ctx context.Context, data *SendAudioRequest) (*Sen
 	resolved := s.resolveJID(ctx, client, *data.RemoteJID)
 	data.RemoteJID = &resolved
 
+	mentioned, everyone, err := s.resolveMentions(resolved, data.MentionsEveryOne, data.Mentioned)
+	if err != nil {
+		return nil, err
+	}
+	audio.ContextInfo = buildContextInfo(data.Quote, mentioned, everyone)
+
 	res, err := client.SendMessage(ctx, *data.RemoteJID, &waE2E.Message{
 		AudioMessage: &audio,
 	})
@@ -153,12 +333,15 @@ func (s *Whatsmiau) SendAudio(ctx context.Context, data *SendAudioRequest) (*Sen
 }
 
 type SendDocumentRequest struct {
-	InstanceID string     `json:"instance_id"`
-	MediaURL   string     `json:"media_url"`
-	Caption    string     `json:"caption"`
-	FileName   string     `json:"file_name"`
-	RemoteJID  *types.JID `json:"remote_jid"`
-	Mimetype   string     `json:"mimetype"`
+	InstanceID       string     `json:"instance_id"`
+	MediaURL         string     `json:"media_url"`
+	Caption          string     `json:"caption"`
+	FileName         string     `json:"file_name"`
+	RemoteJID        *types.JID `json:"remote_jid"`
+	Mimetype         string     `json:"mimetype"`
+	Quote            *Quote     `json:"quote,omitempty"`
+	MentionsEveryOne bool       `json:"mentionsEveryOne,omitempty"`
+	Mentioned        []string   `json:"mentioned,omitempty"`
 }
 
 type SendDocumentResponse struct {
@@ -177,12 +360,7 @@ func (s *Whatsmiau) SendDocument(ctx context.Context, data *SendDocumentRequest)
 		return nil, fmt.Errorf("remote_jid is required")
 	}
 
-	resMedia, err := s.getCtx(ctx, data.MediaURL)
-	if err != nil {
-		return nil, err
-	}
-
-	dataBytes, err := io.ReadAll(resMedia.Body)
+	dataBytes, err := s.fetchBytes(ctx, data.MediaURL)
 	if err != nil {
 		return nil, err
 	}
@@ -207,6 +385,12 @@ func (s *Whatsmiau) SendDocument(ctx context.Context, data *SendDocumentRequest)
 	resolved := s.resolveJID(ctx, client, *data.RemoteJID)
 	data.RemoteJID = &resolved
 
+	mentioned, everyone, err := s.resolveMentions(resolved, data.MentionsEveryOne, data.Mentioned)
+	if err != nil {
+		return nil, err
+	}
+	doc.ContextInfo = buildContextInfo(data.Quote, mentioned, everyone)
+
 	res, err := client.SendMessage(ctx, *data.RemoteJID, &waE2E.Message{
 		DocumentMessage: &doc,
 	})
@@ -221,12 +405,15 @@ func (s *Whatsmiau) SendDocument(ctx context.Context, data *SendDocumentRequest)
 }
 
 type SendImageRequest struct {
-	InstanceID string     `json:"instance_id"`
-	MediaURL   string     `json:"media_url"`
-	MediaBytes []byte     `json:"-"` // optional: send image from bytes instead of URL
-	Caption    string     `json:"caption"`
-	RemoteJID  *types.JID `json:"remote_jid"`
-	Mimetype   string     `json:"mimetype"`
+	InstanceID       string     `json:"instance_id"`
+	MediaURL         string     `json:"media_url"`
+	MediaBytes       []byte     `json:"-"` // optional: send image from bytes instead of URL
+	Caption          string     `json:"caption"`
+	RemoteJID        *types.JID `json:"remote_jid"`
+	Mimetype         string     `json:"mimetype"`
+	Quote            *Quote     `json:"quote,omitempty"`
+	MentionsEveryOne bool       `json:"mentionsEveryOne,omitempty"`
+	Mentioned        []string   `json:"mentioned,omitempty"`
 }
 type SendImageResponse struct {
 	ID        string    `json:"id"`
@@ -243,14 +430,13 @@ func (s *Whatsmiau) SendImage(ctx context.Context, data *SendImageRequest) (*Sen
 		return nil, fmt.Errorf("remote_jid is required")
 	}
 
-	resMedia, err := s.getCtx(ctx, data.MediaURL)
-	if err != nil {
-		return nil, err
-	}
-
-	dataBytes, err := io.ReadAll(resMedia.Body)
-	if err != nil {
-		return nil, err
+	dataBytes := data.MediaBytes
+	if len(dataBytes) == 0 {
+		var err error
+		dataBytes, err = s.fetchBytes(ctx, data.MediaURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	uploaded, err := client.Upload(ctx, dataBytes, whatsmeow.MediaImage)
@@ -275,6 +461,12 @@ func (s *Whatsmiau) SendImage(ctx context.Context, data *SendImageRequest) (*Sen
 
 	resolved := s.resolveJID(ctx, client, *data.RemoteJID)
 	data.RemoteJID = &resolved
+
+	mentioned, everyone, err := s.resolveMentions(resolved, data.MentionsEveryOne, data.Mentioned)
+	if err != nil {
+		return nil, err
+	}
+	doc.ContextInfo = buildContextInfo(data.Quote, mentioned, everyone)
 
 	res, err := client.SendMessage(ctx, *data.RemoteJID, &waE2E.Message{
 		ImageMessage: &doc,
@@ -333,10 +525,6 @@ func (s *Whatsmiau) SendReaction(ctx context.Context, data *SendReactionRequest)
 
 	if data.RemoteJID == nil {
 		return nil, fmt.Errorf("remote_jid is required")
-	}
-
-	if len(data.Reaction) <= 0 {
-		return nil, fmt.Errorf("empty reaction, len: %d", len(data.Reaction))
 	}
 
 	if len(data.MessageID) <= 0 {
@@ -511,6 +699,20 @@ type SendButtonsRequestData struct {
 	Buttons     []SendButtonItem `json:"buttons"`
 }
 
+type SendURLButtonItem struct {
+	DisplayText string `json:"display_text"`
+	URL         string `json:"url"`
+}
+
+type SendURLButtonsRequestData struct {
+	InstanceID  string              `json:"instance_id"`
+	RemoteJID   *types.JID          `json:"remote_jid"`
+	Title       string              `json:"title"`
+	Description string              `json:"description"`
+	Footer      string              `json:"footer"`
+	Buttons     []SendURLButtonItem `json:"buttons"`
+}
+
 type SendButtonsResponse struct {
 	ID        string    `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
@@ -606,6 +808,81 @@ func (s *Whatsmiau) SendButtons(ctx context.Context, data *SendButtonsRequestDat
 		ID:        res.ID,
 		CreatedAt: res.Timestamp,
 	}, nil
+}
+
+func (s *Whatsmiau) SendURLButtons(ctx context.Context, data *SendURLButtonsRequestData) (*SendButtonsResponse, error) {
+	client, ok := s.clients.Load(data.InstanceID)
+	if !ok {
+		return nil, whatsmeow.ErrClientIsNil
+	}
+	if data.RemoteJID == nil {
+		return nil, fmt.Errorf("remote_jid is required")
+	}
+	if len(data.Buttons) == 0 {
+		return nil, fmt.Errorf("at least one URL button is required")
+	}
+
+	resolved := s.resolveJID(ctx, client, *data.RemoteJID)
+	data.RemoteJID = &resolved
+
+	buttons := make([]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton, 0, len(data.Buttons))
+	for _, button := range data.Buttons {
+		displayText := strings.TrimSpace(button.DisplayText)
+		link := strings.TrimSpace(button.URL)
+		if displayText == "" || link == "" {
+			return nil, fmt.Errorf("URL button display_text and url are required")
+		}
+
+		paramsJSON, err := json.Marshal(map[string]string{
+			"display_text": displayText,
+			"url":          link,
+			"merchant_url": link,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("marshal URL button parameters: %w", err)
+		}
+		buttons = append(buttons, &waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+			Name:             proto.String("cta_url"),
+			ButtonParamsJSON: proto.String(string(paramsJSON)),
+		})
+	}
+
+	interactive := &waE2E.InteractiveMessage{
+		Body: &waE2E.InteractiveMessage_Body{Text: proto.String(data.Description)},
+		InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+			NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+				MessageVersion: proto.Int32(1),
+				Buttons:        buttons,
+			},
+		},
+	}
+	if data.Title != "" {
+		interactive.Header = &waE2E.InteractiveMessage_Header{Title: proto.String(data.Title)}
+	}
+	if data.Footer != "" {
+		interactive.Footer = &waE2E.InteractiveMessage_Footer{Text: proto.String(data.Footer)}
+	}
+
+	message := &waE2E.Message{InteractiveMessage: interactive}
+	extraNodes := []waBinary.Node{{
+		Tag: "biz",
+		Content: []waBinary.Node{{
+			Tag:   "interactive",
+			Attrs: waBinary.Attrs{"type": "native_flow", "v": "1"},
+			Content: []waBinary.Node{{
+				Tag:   "native_flow",
+				Attrs: waBinary.Attrs{"v": "9", "name": "mixed"},
+			}},
+		}},
+	}}
+
+	res, err := client.SendMessage(ctx, *data.RemoteJID, message, whatsmeow.SendRequestExtra{
+		AdditionalNodes: &extraNodes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &SendButtonsResponse{ID: res.ID, CreatedAt: res.Timestamp}, nil
 }
 
 // --- SendPixPayment ---

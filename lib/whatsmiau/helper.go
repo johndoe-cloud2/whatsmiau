@@ -20,6 +20,8 @@ import (
 	"github.com/verbeux-ai/whatsmiau/env"
 	"github.com/verbeux-ai/whatsmiau/models"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"go.uber.org/zap"
 	"golang.org/x/net/context"
@@ -96,6 +98,40 @@ func (s *Whatsmiau) getMediaBytes(ctx context.Context, url string) ([]byte, erro
 			zap.String("first_bytes_hex", hexHead))
 	}
 	return data, nil
+}
+
+// fetchBytes downloads url contents into memory and guarantees the response body is closed.
+// Supports both HTTP(S) URLs and data: URIs (Base64).
+func (s *Whatsmiau) fetchBytes(ctx context.Context, url string) ([]byte, error) {
+	if strings.HasPrefix(url, "data:") {
+		_, _, decoded, err := extractFromBase64(url)
+		if err != nil {
+			return nil, fmt.Errorf("decode base64 media: %w", err)
+		}
+		return decoded, nil
+	}
+
+	res, err := s.getCtx(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	return io.ReadAll(res.Body)
+}
+
+// loadClientWithJID validates the instance client, ensures jid is non-nil, and returns
+// the client together with the resolved JID. Centralises the boilerplate used by every
+// Send* method.
+func (s *Whatsmiau) loadClientWithJID(ctx context.Context, instanceID string, jid *types.JID) (*whatsmeow.Client, types.JID, error) {
+	client, ok := s.clients.Load(instanceID)
+	if !ok {
+		return nil, types.EmptyJID, whatsmeow.ErrClientIsNil
+	}
+	if jid == nil {
+		return nil, types.EmptyJID, fmt.Errorf("remote_jid is required")
+	}
+	resolved := s.resolveJID(ctx, client, *jid)
+	return client, resolved, nil
 }
 
 // Returns audioConverted, waveform, duration and an error
@@ -389,9 +425,16 @@ func isGroupOrChannelJID(jid string) bool {
 	return strings.HasSuffix(jid, "@g.us") || strings.HasSuffix(jid, "@newsletter") || strings.HasSuffix(jid, "@broadcast")
 }
 
+// shouldSaveMedia returns true if message media must be persisted in the file storage.
+// A nil SaveMedia means enabled, preserving the behavior of instances created before
+// this flag existed.
+func shouldSaveMedia(instance *models.Instance) bool {
+	return instance.SaveMedia == nil || *instance.SaveMedia
+}
+
 // canIgnoreGroup returns true if group can be ignored
 func canIgnoreGroup(evt interface{}, instance *models.Instance) bool {
-	if !instance.GroupsIgnore {
+	if instance.GroupsIgnore == nil || !*instance.GroupsIgnore {
 		return false
 	}
 
@@ -443,7 +486,7 @@ func configProxy(client *whatsmeow.Client, instanceProxy models.InstanceProxy) {
 	}
 
 	var jid string
-	if client.Store.ID != nil {
+	if client.Store != nil && client.Store.ID != nil {
 		jid = client.Store.ID.String()
 	}
 
@@ -459,6 +502,52 @@ func configProxy(client *whatsmeow.Client, instanceProxy models.InstanceProxy) {
 
 func mountProxyUrl(proxy models.InstanceProxy) string {
 	return fmt.Sprintf("%s://%s:%s@%s:%s", proxy.ProxyProtocol, proxy.ProxyUsername, proxy.ProxyPassword, proxy.ProxyHost, proxy.ProxyPort)
+}
+
+func buildVCard(fullName, wuid, phone, organization, email, urlValue string) string {
+	if wuid == "" {
+		wuid = strings.TrimPrefix(phone, "+")
+		wuid = strings.ReplaceAll(wuid, " ", "")
+	}
+
+	var b strings.Builder
+	b.WriteString("BEGIN:VCARD\n")
+	b.WriteString("VERSION:3.0\n")
+	fmt.Fprintf(&b, "N:;%s;;;\n", fullName)
+	fmt.Fprintf(&b, "FN:%s\n", fullName)
+	if organization != "" {
+		fmt.Fprintf(&b, "ORG:%s\n", organization)
+	}
+	fmt.Fprintf(&b, "TEL;type=CELL;type=VOICE;waid=%s:%s\n", wuid, phone)
+	if email != "" {
+		fmt.Fprintf(&b, "EMAIL;type=INTERNET:%s\n", email)
+	}
+	if urlValue != "" {
+		fmt.Fprintf(&b, "URL:%s\n", urlValue)
+	}
+	b.WriteString("END:VCARD")
+	return b.String()
+}
+
+// parseStatusBackgroundARGB converts a hex color string (#RRGGBB or #AARRGGBB) to an ARGB uint32.
+// Returns 0 if the input is empty or malformed.
+func parseStatusBackgroundARGB(s string) uint32 {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "#")
+	if s == "" {
+		return 0
+	}
+	if len(s) == 6 {
+		s = "FF" + s
+	}
+	if len(s) != 8 {
+		return 0
+	}
+	var v uint32
+	if _, err := fmt.Sscanf(s, "%08x", &v); err != nil {
+		return 0
+	}
+	return v
 }
 
 // Adding or removing the 9th digit. Returns empty if not applicable.
@@ -478,4 +567,101 @@ func buildBrazilianAlternate(number string) string {
 	default:
 		return ""
 	}
+}
+
+func (s *Whatsmiau) buildMessageDataFromHistory(msg *waWeb.WebMessageInfo, convName, displayName string) *WookMessageData {
+	if msg == nil || msg.Message == nil {
+		return nil
+	}
+
+	key := msg.GetKey()
+	if key == nil {
+		return nil
+	}
+
+	messageType, raw, ci := s.parseWAMessage(msg.Message)
+	if messageType == "" {
+		return nil
+	}
+
+	wookKey := &WookKey{
+		RemoteJid:      key.GetRemoteJID(),
+		FromMe:         key.GetFromMe(),
+		Id:             key.GetID(),
+		Participant:    key.GetParticipant(),
+		AddressingMode: "jid",
+	}
+
+	status := statusFromHistory(msg.GetStatus(), key.GetFromMe())
+
+	pushName := msg.GetPushName()
+	if key.GetFromMe() {
+		if pushName == "" {
+			pushName = fromMePushName("pt-BR")
+		}
+	} else if pushName == "" {
+
+		if jid := key.GetRemoteJID(); jid != "" {
+			if idx := strings.Index(jid, "@"); idx != -1 {
+				pushName = jid[:idx]
+			}
+		}
+		if pushName == "" {
+			switch {
+			case convName != "":
+				pushName = convName
+			case displayName != "":
+				pushName = displayName
+			}
+		}
+	}
+
+	var contextInfo *WookMessageContextInfo
+	if ci != nil {
+		contextInfo = &WookMessageContextInfo{
+			StanzaId:     ci.GetStanzaID(),
+			Participant:  ci.GetParticipant(),
+			Expiration:   int(ci.GetExpiration()),
+			MentionedJid: ci.GetMentionedJID(),
+		}
+		if qm := ci.GetQuotedMessage(); qm != nil {
+			_, qmRaw, _ := s.parseWAMessage(qm)
+			contextInfo.QuotedMessage = qmRaw
+		}
+	}
+
+	return &WookMessageData{
+		Key:              &WookMessageKey{WookKey: *wookKey},
+		PushName:         pushName,
+		Status:           status,
+		Message:          raw,
+		MessageType:      messageType,
+		MessageTimestamp: int(msg.GetMessageTimestamp()),
+		Source:           "unknown",
+		ContextInfo:      contextInfo,
+	}
+}
+
+func statusFromHistory(status waWeb.WebMessageInfo_Status, fromMe bool) string {
+	if fromMe {
+		return "SENT"
+	}
+	if status == waWeb.WebMessageInfo_ERROR {
+		return "DELIVERY_ACK"
+	}
+	return waWeb.WebMessageInfo_Status_name[int32(status)]
+}
+
+// fromMePushNames mapeia locale → push name para mensagens enviadas pelo usuário.
+// O padrão é pt-BR (base de usuários atual). Adicione novos idiomas estendendo o mapa.
+var fromMePushNames = map[string]string{
+	"pt-BR": "Você",
+	"en":    "You",
+}
+
+func fromMePushName(locale string) string {
+	if name, ok := fromMePushNames[locale]; ok {
+		return name
+	}
+	return "You"
 }

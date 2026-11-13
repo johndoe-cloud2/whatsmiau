@@ -5,7 +5,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/verbeux-ai/whatsmiau/lib/whatsmiau"
 	"github.com/verbeux-ai/whatsmiau/models"
+	"github.com/verbeux-ai/whatsmiau/server/dto"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -15,13 +17,38 @@ func numberToJid(number string) (*types.JID, error) {
 		number += "@s.whatsapp.net"
 	}
 
-	if len(splitNumber[0]) < 12 {
+	// E.164 numbers are 8-15 digits including the country code. The previous
+	// "< 12" bound only fit Brazilian numbers (55 + DDD + 8/9 = 12-13 digits)
+	// and wrongly rejected valid shorter international numbers that already
+	// carry their country prefix, e.g. US +1 (11 digits) and Spain +34 (11).
+	if len(splitNumber[0]) < 8 {
 		return nil, fmt.Errorf("invalid jid, put country prefix")
 	}
 
 	jid, err := types.ParseJID(number)
 	if err != nil {
 		return nil, fmt.Errorf("invalid jid (number)")
+	}
+
+	return &jid, nil
+}
+
+func parseGroupJID(input string) (*types.JID, error) {
+	if input == "" {
+		return nil, fmt.Errorf("group jid is required")
+	}
+
+	if !strings.Contains(input, "@") {
+		input += "@" + types.GroupServer
+	}
+
+	jid, err := types.ParseJID(input)
+	if err != nil {
+		return nil, fmt.Errorf("invalid group jid: %w", err)
+	}
+
+	if jid.Server != types.GroupServer {
+		return nil, fmt.Errorf("not a group jid: %s", jid.String())
 	}
 
 	return &jid, nil
@@ -63,4 +90,23 @@ func splitHostPort(h string) (string, string, error) {
 		return "", "", fmt.Errorf("expected host:port, got %s", h)
 	}
 	return parts[0], parts[1], nil
+}
+
+func buildQuote(q *dto.MessageRequestQuoted) (*whatsmiau.Quote, error) {
+	if q == nil || len(q.Key.Id) == 0 {
+		return nil, nil
+	}
+
+	quote := &whatsmiau.Quote{
+		MessageID: q.Key.Id,
+		Message:   q.Message.Conversation,
+	}
+	if q.Key.Participant != "" {
+		p, err := numberToJid(q.Key.Participant)
+		if err != nil {
+			return nil, fmt.Errorf("invalid quoted participant format")
+		}
+		quote.Participant = p
+	}
+	return quote, nil
 }

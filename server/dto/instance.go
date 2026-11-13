@@ -14,7 +14,7 @@ type CreateInstanceRequest struct {
 }
 
 type MigrationData struct {
-	Creds   json.RawMessage   `json:"creds" validate:"required"`
+	Creds   json.RawMessage   `json:"creds" validate:"required" swaggertype:"object"`
 	PreKeys []MigrationPreKey `json:"preKeys,omitempty"`
 }
 
@@ -41,10 +41,16 @@ type MigrationResult struct {
 }
 
 type UpdateInstanceRequest struct {
-	ID      string `json:"id,omitempty" param:"id" validate:"required" swaggerignore:"true"`
-	Webhook struct {
+	ID           string  `json:"id,omitempty" param:"id" validate:"required" swaggerignore:"true"`
+	GroupsIgnore *bool   `json:"groupsIgnore,omitempty"`
+	SaveMedia    *bool   `json:"saveMedia,omitempty"`
+	ReadMessages *bool   `json:"readMessages,omitempty"`
+	RejectCall   *bool   `json:"rejectCall,omitempty"`
+	MsgCall      *string `json:"msgCall,omitempty"`
+	AlwaysOnline *bool   `json:"alwaysOnline,omitempty"`
+	Webhook      struct {
 		Enabled *bool    `json:"enabled,omitempty"`
-		Base64  bool     `json:"base64,omitempty"`
+		Base64  *bool    `json:"base64,omitempty"`
 		URL     string   `json:"url,omitempty"`
 		Events  []string `json:"events,omitempty"`
 	} `json:"webhook,omitempty"`
@@ -73,11 +79,12 @@ type ConnectInstanceRequest struct {
 }
 
 type ConnectInstanceResponse struct {
-	Message     string `json:"message,omitempty"`
-	Connected   bool   `json:"connected,omitempty"`
-	Base64      string `json:"base64,omitempty"`
-	PairingCode string `json:"pairingCode,omitempty"`
-	PhoneNumber string `json:"phoneNumber,omitempty"`
+	Message      string `json:"message,omitempty"`
+	Connected    bool   `json:"connected,omitempty"`
+	Base64       string `json:"base64,omitempty"`
+	PairingCode  string `json:"pairingCode,omitempty"`
+	PairingError string `json:"pairingError,omitempty"`
+	PhoneNumber  string `json:"phoneNumber,omitempty"`
 	*models.Instance
 }
 
@@ -110,4 +117,19 @@ type LogoutInstanceRequest struct {
 
 type LogoutInstanceResponse struct {
 	Message string `json:"message,omitempty"`
+}
+
+type RestartInstanceRequest struct {
+	ID string `param:"id" validate:"required" swaggerignore:"true"`
+}
+
+type RestartInstanceResponse struct {
+	ID       string                           `json:"id,omitempty"`
+	Status   string                           `json:"state,omitempty"`
+	Instance *RestartInstanceEvoCompatibility `json:"instance,omitempty"`
+}
+
+type RestartInstanceEvoCompatibility struct {
+	InstanceName string `json:"instanceName,omitempty"`
+	Status       string `json:"status,omitempty"`
 }

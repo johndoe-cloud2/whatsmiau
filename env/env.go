@@ -1,6 +1,8 @@
 package env
 
 import (
+	"time"
+
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
 )
@@ -33,6 +35,14 @@ type E struct {
 	// Local media: save images/audio/etc. to a folder (e.g. ./media or /app/media). MEDIA_PUBLIC_URL is the base URL for links (e.g. http://localhost:8080).
 	LocalMediaPath string `env:"LOCAL_MEDIA_PATH" envDefault:""`
 	MediaPublicURL string `env:"MEDIA_PUBLIC_URL" envDefault:""`
+	S3Enabled      bool          `env:"S3_ENABLED" envDefault:"false"`
+	S3Bucket       string        `env:"S3_BUCKET"`
+	S3Region       string        `env:"S3_REGION"`
+	S3Endpoint     string        `env:"S3_ENDPOINT"`
+	S3UsePathStyle bool          `env:"S3_USE_PATH_STYLE" envDefault:"false"`
+	S3Prefix       string        `env:"S3_PREFIX"`
+	S3PublicURL    string        `env:"S3_PUBLIC_URL"`
+	S3PresignTTL   time.Duration `env:"S3_PRESIGN_TTL" envDefault:"1h"`
 
 	GCL          string `json:"GCL_APP_NAME" envDefault:"whatsmiau-br-1"`
 	GCLEnabled   bool   `json:"GCL_ENABLED" envDefault:"false"`
@@ -55,6 +65,16 @@ type E struct {
 	ProxyAddresses []string `env:"PROXY_ADDRESSES" envDefault:""`      // random choices proxies ex: <SOCKS5|HTTP|HTTPS>://<username>:<password>@<host>:<port>
 	ProxyStrategy  string   `env:"PROXY_STRATEGY" envDefault:"RANDOM"` // todo: implement BALANCED
 	ProxyNoMedia   bool     `env:"PROXY_NO_MEDIA" envDefault:"false"`
+
+	// CallsEnabled enables the experimental 1:1 call API. It is deliberately
+	// disabled by default because WhatsApp calls are protocol-sensitive.
+	CallsEnabled bool `env:"CALLS_ENABLED" envDefault:"false"`
+	// CallDebug emits sanitized incoming offer shapes for controlled protocol
+	// tests. It never logs call keys, encrypted payloads, call IDs, or JIDs.
+	CallDebug bool `env:"CALL_DEBUG" envDefault:"false"`
+	// CallMediaDebug surfaces the call library's sanitized signaling and media
+	// logs. The raw-secrets recorder (meowcaller.WithDiagnostics) stays off.
+	CallMediaDebug bool `env:"CALL_MEDIA_DEBUG" envDefault:"false"`
 }
 
 var Env E

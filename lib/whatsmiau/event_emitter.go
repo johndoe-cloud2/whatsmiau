@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,8 +29,9 @@ import (
 )
 
 type emitter struct {
-	url  string
-	data any
+	url     string
+	headers map[string]string
+	data    any
 }
 
 func (s *Whatsmiau) getInstance(id string) *models.Instance {
@@ -117,7 +119,7 @@ func (s *Whatsmiau) processEmit(event emitter) {
 			backoff *= 2
 		}
 
-		success, shouldRetry := s.doEmit(data, event.url)
+		success, shouldRetry := s.doEmit(data, event.url, event.headers)
 		if success || !shouldRetry {
 			return
 		}
@@ -138,7 +140,12 @@ func (s *Whatsmiau) processEmit(event emitter) {
 
 // doEmit performs a single webhook delivery attempt with a 10s timeout.
 // Returns (success, shouldRetry).
-func (s *Whatsmiau) doEmit(data []byte, url string) (bool, bool) {
+func (s *Whatsmiau) doEmit(data []byte, url string, headers map[string]string) (bool, bool) {
+	if len(headers) > 0 && !isHTTPSWebhookURL(url) {
+		zap.L().Error("refusing to deliver webhook headers over a non-https url", zap.String("url", url))
+		return false, false // terminal, don't retry
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -149,8 +156,18 @@ func (s *Whatsmiau) doEmit(data []byte, url string) (bool, bool) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.httpClient.Do(req)
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
+	if len(headers) > 0 {
+		req = req.WithContext(context.WithValue(req.Context(), webhookCredentialsContextKey{}, true))
+	}
+	resp, err := s.webhookClient.Do(req)
 	if err != nil {
+		if errors.Is(err, errWebhookRedirect) || errors.Is(err, errTooManyWebhookRedirects) {
+			zap.L().Error("refused webhook redirect for credentialed delivery", zap.Error(err), zap.String("url", url))
+			return false, false // deterministic refusal, don't retry
+		}
 		zap.L().Error("failed to send webhook", zap.Error(err), zap.String("url", url))
 		return false, true // network error, retry
 	}
@@ -184,11 +201,11 @@ func (s *Whatsmiau) doEmit(data []byte, url string) (bool, bool) {
 	return false, false
 }
 
-func (s *Whatsmiau) emit(body any, url string) {
-	if url == "" {
+func (s *Whatsmiau) emit(body any, webhook models.InstanceWebhook) {
+	if webhook.Url == "" {
 		return
 	}
-	s.emitter <- emitter{url, body}
+	s.emitter <- emitter{url: webhook.Url, headers: webhook.Headers, data: body}
 }
 
 // emitForInstance sends the event to the webhook and records in Redis the last time this instance sent an event (for stale cleanup).
@@ -200,7 +217,37 @@ func (s *Whatsmiau) emitForInstance(instanceID string, body any, url string) {
 			cancel()
 		}
 	}
-	s.emit(body, url)
+	if url == "" {
+		return
+	}
+	// Custom headers belong to the instance's own webhook: never send them to the global
+	// WEBHOOK_URL (or any other URL).
+	var headers map[string]string
+	if instanceID != "" {
+		if inst := s.getInstanceCached(instanceID); inst != nil && inst.Webhook.Url == url {
+			headers = inst.Webhook.Headers
+		}
+	}
+	s.emitter <- emitter{url: url, headers: headers, data: body}
+}
+
+// emitForInstanceWebhook is emitForInstance for callers that already hold the instance:
+// its custom headers go along only when delivering to its own webhook URL.
+func (s *Whatsmiau) emitForInstanceWebhook(instance *models.Instance, body any) {
+	url := getWebhookURL(instance)
+	if url == "" || instance == nil {
+		return
+	}
+	if redisRepo, ok := s.repo.(*instances.RedisInstance); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = redisRepo.TouchLastWebhookActivity(ctx, instance.ID)
+		cancel()
+	}
+	var headers map[string]string
+	if instance.Webhook.Url == url {
+		headers = instance.Webhook.Headers
+	}
+	s.emitter <- emitter{url: url, headers: headers, data: body}
 }
 
 // messageKey builds a unique key for deduplication: chatJid|fromMe|messageId.
@@ -384,15 +431,35 @@ func (s *Whatsmiau) EmitMessageSent(instance *models.Instance, instanceID, remot
 	s.emitForInstance(instanceID, payload, url)
 }
 
-func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
+// handleClient returns the event handler for one whatsmeow client. Events from a client
+// that is no longer the registered one for this instance (replaced/torn down "ghost"
+// client) are ignored.
+func (s *Whatsmiau) handleClient(id string, source *whatsmeow.Client) whatsmeow.EventHandler {
 	return func(evt any) {
 		s.handlerSemaphore <- struct{}{}
 		go func() {
-			defer func() { <-s.handlerSemaphore }()
+			defer func() {
+				// Runs outside echo's Recover middleware: a panic here would kill the process
+				// and every live WhatsApp session with it.
+				if r := recover(); r != nil {
+					zap.L().Error("panic in event handler",
+						zap.String("instance", id),
+						zap.Any("panic", r),
+						zap.Stack("stack"),
+					)
+				}
+				<-s.handlerSemaphore
+			}()
+			if source != nil {
+				current, ok := s.clients.Load(id)
+				if !ok || current != source {
+					return
+				}
+			}
 			instance := s.getInstanceCached(id)
 			// LoggedOut: still teardown client/DB even if Redis row was already removed (401 cascade).
 			if _, ok := evt.(*events.LoggedOut); ok {
-				s.handleLoggedOut(id)
+				s.handleClientLoggedOut(id, source)
 				return
 			}
 			// ClientOutdated (405): whatsmeow disables its auto-reconnect, so refresh the WA
@@ -424,6 +491,31 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 				}
 			}
 
+			// Apply alwaysOnline presence on connect, regardless of webhook state.
+			if _, ok := evt.(*events.Connected); ok && instance.AlwaysOnline != nil {
+				s.ApplyPresence(id, *instance.AlwaysOnline)
+			}
+			if env.Env.CallDebug {
+				if offer, ok := evt.(*events.CallOffer); ok {
+					s.debugCallOfferShape(id, offer.Data)
+				}
+			}
+			// On-demand history sync answering a syncMessages API call goes to its waiter
+			// only; any other ON_DEMAND blob continues to handleHistorySyncEvent below.
+			if hs, ok := evt.(*events.HistorySync); ok && hs.Data != nil && hs.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
+				if w, ok := s.pendingSyncs.Load(id); ok &&
+					historySyncMatchesChat(hs, w.chat) &&
+					historySyncMatchesSend(hs, w.sendID) {
+					// Non-blocking send: a stale duplicate blob arriving after a
+					// timeout must not stall this event goroutine.
+					select {
+					case w.ch <- hs:
+					default:
+					}
+					return
+				}
+			}
+
 			// Per-instance webhook toggle only applies when not using global WEBHOOK_URL.
 			if env.Env.WebhookURL == "" {
 				if instance.Webhook.Enabled != nil && !*instance.Webhook.Enabled {
@@ -435,20 +527,13 @@ func (s *Whatsmiau) Handle(id string) whatsmeow.EventHandler {
 			for _, event := range instance.Webhook.Events {
 				eventMap[event] = true
 			}
-
+			// Webhook only carries incoming messages (messages.upsert) and connection
+			// lifecycle (connection.update, session.lost). Receipts (messages.update),
+			// contact/picture/push-name updates (contacts.upsert) and revokes
+			// (messages.delete) are intentionally not sent.
 			switch e := evt.(type) {
 			case *events.Message:
 				s.handleMessageEvent(id, instance, e, eventMap)
-			case *events.Receipt:
-				s.handleReceiptEvent(id, instance, e, eventMap)
-			case *events.BusinessName:
-				s.handleBusinessNameEvent(id, instance, e, eventMap)
-			case *events.Contact:
-				s.handleContactEvent(id, instance, e, eventMap)
-			case *events.Picture:
-				s.handlePictureEvent(id, instance, e, eventMap)
-			case *events.PushName:
-				s.handlePushNameEvent(id, instance, e, eventMap)
 			case *events.Connected:
 				s.handleConnectionUpdateEvent(id, instance, "open", 200, eventMap)
 			case *events.Disconnected:
@@ -490,6 +575,17 @@ func (s *Whatsmiau) handleConnected(id string, instance *models.Instance) {
 	}
 	zap.L().Info("emitting connection.update to webhook", zap.String("instance", id), zap.String("state", Connected))
 	s.emitForInstance(id, payload, url)
+}
+
+// handleClientLoggedOut tears the instance down only if source is still its registered
+// client: a LoggedOut from a replaced client must not destroy the new session.
+func (s *Whatsmiau) handleClientLoggedOut(id string, source *whatsmeow.Client) {
+	if source != nil {
+		if client, ok := s.clients.Load(id); !ok || client != source {
+			return
+		}
+	}
+	s.handleLoggedOut(id)
 }
 
 func (s *Whatsmiau) handleLoggedOut(id string) {
@@ -554,8 +650,8 @@ func (s *Whatsmiau) TeardownInstance(id string) {
 
 func (s *Whatsmiau) handleMessageEvent(id string, instance *models.Instance, e *events.Message, eventMap map[string]bool) {
 	if e.Message != nil {
+		// Revokes ("deleted for everyone") are not sent to the webhook.
 		if pm := e.Message.GetProtocolMessage(); pm != nil && pm.GetType() == waE2E.ProtocolMessage_REVOKE {
-			s.handleMessageDeleteEvent(id, instance, e, eventMap)
 			return
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -30,6 +31,8 @@ func NewMessages(repository interfaces.InstanceRepository, whatsmiau *whatsmiau.
 	}
 }
 
+var emojiRegex = regexp.MustCompile(`[\x{1F000}-\x{1FFFF}]|[\x{2300}-\x{23FF}]|[\x{2600}-\x{27BF}]|[\x{2B00}-\x{2BFF}]|[\x{2000}-\x{206F}]|[\x{2100}-\x{214F}]|[\x{2190}-\x{21FF}]`)
+
 // SendText godoc
 // @Summary      Send a text message
 // @Description  Sends a text message to a WhatsApp number via the specified instance
@@ -43,8 +46,8 @@ func NewMessages(repository interfaces.InstanceRepository, whatsmiau *whatsmiau.
 // @Failure      400       {object}  utils.HTTPErrorResponse
 // @Failure      422       {object}  utils.HTTPErrorResponse
 // @Failure      500       {object}  utils.HTTPErrorResponse
-// @Router       /instance/{instance}/message/text [post]
-// @Router       /message/sendText/{instance} [post]
+// @Router       /v1/instance/{instance}/message/text [post]
+// @Router       /v1/message/sendText/{instance} [post]
 func (s *Message) SendText(ctx echo.Context) error {
 	var request dto.SendTextRequest
 	if err := ctx.Bind(&request); err != nil {
@@ -61,15 +64,25 @@ func (s *Message) SendText(ctx echo.Context) error {
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid number format")
 	}
 
-	sendText := &whatsmiau.SendText{
-		Text:       request.Text,
-		InstanceID: request.InstanceID,
-		RemoteJID:  jid,
+	quote, err := buildQuote(request.Quoted)
+	if err != nil {
+		zap.L().Error("error converting quoted participant to jid", zap.Error(err))
+		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid quoted participant format")
 	}
 
-	if request.Quoted != nil && len(request.Quoted.Key.Id) > 0 && len(request.Quoted.Message.Conversation) > 0 {
-		sendText.QuoteMessage = request.Quoted.Message.Conversation
-		sendText.QuoteMessageID = request.Quoted.Key.Id
+	sendText := &whatsmiau.SendText{
+		Text:             request.Text,
+		InstanceID:       request.InstanceID,
+		RemoteJID:        jid,
+		Quote:            quote,
+		LinkPreview:      request.LinkPreview,
+		MentionsEveryOne: request.MentionsEveryOne,
+		Mentioned:        request.Mentioned,
+
+		LinkPreviewImage:       request.LinkPreviewImage,
+		LinkPreviewTitle:       request.LinkPreviewTitle,
+		LinkPreviewDescription: request.LinkPreviewDescription,
+		LinkPreviewLarge:       request.LinkPreviewLarge,
 	}
 
 	c := ctx.Request().Context()
@@ -128,8 +141,8 @@ func (s *Message) SendText(ctx echo.Context) error {
 // @Failure      400       {object}  utils.HTTPErrorResponse
 // @Failure      422       {object}  utils.HTTPErrorResponse
 // @Failure      500       {object}  utils.HTTPErrorResponse
-// @Router       /instance/{instance}/message/audio [post]
-// @Router       /message/sendWhatsAppAudio/{instance} [post]
+// @Router       /v1/instance/{instance}/message/audio [post]
+// @Router       /v1/message/sendWhatsAppAudio/{instance} [post]
 func (s *Message) SendAudio(ctx echo.Context) error {
 	var request dto.SendAudioRequest
 	if err := ctx.Bind(&request); err != nil {
@@ -146,15 +159,19 @@ func (s *Message) SendAudio(ctx echo.Context) error {
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid number format")
 	}
 
-	sendText := &whatsmiau.SendAudioRequest{
-		AudioURL:   request.Audio,
-		InstanceID: request.InstanceID,
-		RemoteJID:  jid,
+	quote, err := buildQuote(request.Quoted)
+	if err != nil {
+		zap.L().Error("error converting quoted participant to jid", zap.Error(err))
+		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid quoted participant format")
 	}
 
-	if request.Quoted != nil && len(request.Quoted.Key.Id) > 0 && len(request.Quoted.Message.Conversation) > 0 {
-		sendText.QuoteMessage = request.Quoted.Message.Conversation
-		sendText.QuoteMessageID = request.Quoted.Key.Id
+	sendText := &whatsmiau.SendAudioRequest{
+		AudioURL:         request.Audio,
+		InstanceID:       request.InstanceID,
+		RemoteJID:        jid,
+		Quote:            quote,
+		MentionsEveryOne: request.MentionsEveryOne,
+		Mentioned:        request.Mentioned,
 	}
 
 	c := ctx.Request().Context()
@@ -202,7 +219,7 @@ func (s *Message) SendAudio(ctx echo.Context) error {
 // @Failure      400       {object}  utils.HTTPErrorResponse
 // @Failure      422       {object}  utils.HTTPErrorResponse
 // @Failure      500       {object}  utils.HTTPErrorResponse
-// @Router       /message/sendMedia/{instance} [post]
+// @Router       /v1/message/sendMedia/{instance} [post]
 func (s *Message) SendMedia(ctx echo.Context) error {
 	var request dto.SendMediaRequest
 	if err := ctx.Bind(&request); err != nil {
@@ -212,11 +229,15 @@ func (s *Message) SendMedia(ctx echo.Context) error {
 	if err := validator.New().Struct(&request); err != nil {
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid request body")
 	}
-	if request.Mediatype != "image" {
-		return utils.HTTPFail(ctx, http.StatusBadRequest, nil, "only image media type is supported")
+	switch request.Mediatype {
+	case "image":
+		request.SendDocumentRequest.Mimetype = "image/png"
+		return s.sendImage(ctx, request.SendDocumentRequest)
+	case "video":
+		return s.sendVideo(ctx, request.SendDocumentRequest, false)
 	}
-	request.SendDocumentRequest.Mimetype = "image/png"
-	return s.sendImage(ctx, request.SendDocumentRequest)
+
+	return s.sendDocument(ctx, request.SendDocumentRequest)
 }
 
 // SendDocument godoc
@@ -232,35 +253,54 @@ func (s *Message) SendMedia(ctx echo.Context) error {
 // @Failure      400       {object}  utils.HTTPErrorResponse
 // @Failure      422       {object}  utils.HTTPErrorResponse
 // @Failure      500       {object}  utils.HTTPErrorResponse
-// @Router       /instance/{instance}/message/document [post]
+// @Router       /v1/instance/{instance}/message/document [post]
 func (s *Message) SendDocument(ctx echo.Context) error {
 	var request dto.SendDocumentRequest
 	if err := ctx.Bind(&request); err != nil {
 		return utils.HTTPFail(ctx, http.StatusUnprocessableEntity, err, "failed to bind request body")
 	}
+
 	if err := validator.New().Struct(&request); err != nil {
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid request body")
 	}
+
+	return s.sendDocument(ctx, request)
+}
+
+func (s *Message) sendDocument(ctx echo.Context, request dto.SendDocumentRequest) error {
 	jid, err := numberToJid(request.Number)
 	if err != nil {
 		zap.L().Error("error converting number to jid", zap.Error(err))
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid number format")
 	}
-	sendData := &whatsmiau.SendDocumentRequest{
-		InstanceID: request.InstanceID,
-		MediaURL:   request.Media,
-		Caption:    request.Caption,
-		FileName:   request.FileName,
-		RemoteJID:  jid,
-		Mimetype:   request.Mimetype,
+
+	quote, err := buildQuote(request.Quoted)
+	if err != nil {
+		zap.L().Error("error converting quoted participant to jid", zap.Error(err))
+		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid quoted participant format")
 	}
+
+	sendData := &whatsmiau.SendDocumentRequest{
+		InstanceID:       request.InstanceID,
+		MediaURL:         request.Media,
+		Caption:          request.Caption,
+		FileName:         request.FileName,
+		RemoteJID:        jid,
+		Mimetype:         request.Mimetype,
+		Quote:            quote,
+		MentionsEveryOne: request.MentionsEveryOne,
+		Mentioned:        request.Mentioned,
+	}
+
 	c := ctx.Request().Context()
-	time.Sleep(time.Millisecond * time.Duration(request.Delay))
+	time.Sleep(time.Millisecond * time.Duration(request.Delay)) // TODO: create a more robust solution
+
 	res, err := s.whatsmiau.SendDocument(c, sendData)
 	if err != nil {
 		zap.L().Error("Whatsmiau.SendDocument failed", zap.Error(err))
 		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to send document")
 	}
+
 	return ctx.JSON(http.StatusOK, dto.SendDocumentResponse{
 		Key: dto.MessageResponseKey{
 			RemoteJid: request.Number,
@@ -287,7 +327,7 @@ func (s *Message) SendDocument(ctx echo.Context) error {
 // @Failure      400       {object}  utils.HTTPErrorResponse
 // @Failure      422       {object}  utils.HTTPErrorResponse
 // @Failure      500       {object}  utils.HTTPErrorResponse
-// @Router       /instance/{instance}/message/image [post]
+// @Router       /v1/instance/{instance}/message/image [post]
 func (s *Message) SendImage(ctx echo.Context) error {
 	var request dto.SendDocumentRequest
 	if err := ctx.Bind(&request); err != nil {
@@ -308,12 +348,21 @@ func (s *Message) sendImage(ctx echo.Context, request dto.SendDocumentRequest) e
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid number format")
 	}
 
+	quote, err := buildQuote(request.Quoted)
+	if err != nil {
+		zap.L().Error("error converting quoted participant to jid", zap.Error(err))
+		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid quoted participant format")
+	}
+
 	sendData := &whatsmiau.SendImageRequest{
-		InstanceID: request.InstanceID,
-		MediaURL:   request.Media,
-		Caption:    request.Caption,
-		RemoteJID:  jid,
-		Mimetype:   request.Mimetype,
+		InstanceID:       request.InstanceID,
+		MediaURL:         request.Media,
+		Caption:          request.Caption,
+		RemoteJID:        jid,
+		Mimetype:         request.Mimetype,
+		Quote:            quote,
+		MentionsEveryOne: request.MentionsEveryOne,
+		Mentioned:        request.Mentioned,
 	}
 
 	c := ctx.Request().Context()
@@ -351,7 +400,7 @@ func (s *Message) sendImage(ctx echo.Context, request dto.SendDocumentRequest) e
 // @Failure      400       {object}  utils.HTTPErrorResponse
 // @Failure      422       {object}  utils.HTTPErrorResponse
 // @Failure      500       {object}  utils.HTTPErrorResponse
-// @Router       /message/sendReaction/{instance} [post]
+// @Router       /v1/message/sendReaction/{instance} [post]
 func (s *Message) SendReaction(ctx echo.Context) error {
 	var request dto.SendReactionRequest
 	if err := ctx.Bind(&request); err != nil {
@@ -368,9 +417,8 @@ func (s *Message) SendReaction(ctx echo.Context) error {
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid number format")
 	}
 
-	var emojiRegex = regexp.MustCompile(`[\x{1F600}-\x{1F64F}]|[\x{1F300}-\x{1F5FF}]|[\x{1F680}-\x{1F6FF}]|[\x{2600}-\x{26FF}]|[\x{2700}-\x{27BF}]`)
-	if !emojiRegex.MatchString(request.Reaction) {
-		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid reaction, must be a emoji")
+	if request.Reaction != "" && !emojiRegex.MatchString(request.Reaction) {
+		return utils.HTTPFail(ctx, http.StatusBadRequest, nil, "invalid reaction, must be a emoji")
 	}
 
 	sendReaction := &whatsmiau.SendReactionRequest{
@@ -378,7 +426,7 @@ func (s *Message) SendReaction(ctx echo.Context) error {
 		Reaction:   request.Reaction,
 		RemoteJID:  jid,
 		MessageID:  request.Key.Id,
-		FromMe:     request.Key.FromMe,
+		FromMe:     *request.Key.FromMe,
 	}
 
 	c := ctx.Request().Context()
@@ -391,7 +439,7 @@ func (s *Message) SendReaction(ctx echo.Context) error {
 	return ctx.JSON(http.StatusOK, dto.SendReactionResponse{
 		Key: dto.MessageResponseKey{
 			RemoteJid: request.Key.RemoteJid,
-			FromMe:    true,
+			FromMe:    *request.Key.FromMe,
 			Id:        res.ID,
 		},
 		Status:           "sent",
@@ -414,8 +462,8 @@ func (s *Message) SendReaction(ctx echo.Context) error {
 // @Failure      400       {object}  utils.HTTPErrorResponse
 // @Failure      422       {object}  utils.HTTPErrorResponse
 // @Failure      500       {object}  utils.HTTPErrorResponse
-// @Router       /instance/{instance}/message/list [post]
-// @Router       /message/sendList/{instance} [post]
+// @Router       /v1/instance/{instance}/message/list [post]
+// @Router       /v1/message/sendList/{instance} [post]
 func (s *Message) SendList(ctx echo.Context) error {
 	var request dto.SendListRequest
 	if err := ctx.Bind(&request); err != nil {
@@ -491,7 +539,7 @@ func (s *Message) SendList(ctx echo.Context) error {
 
 // SendButtons godoc
 // @Summary      Send a buttons message
-// @Description  Sends an interactive buttons message (reply type) or PIX payment
+// @Description  Sends interactive reply, URL, or PIX buttons. URL buttons open the supplied HTTP(S) link when tapped.
 // @Tags         Message
 // @Accept       json
 // @Produce      json
@@ -502,8 +550,8 @@ func (s *Message) SendList(ctx echo.Context) error {
 // @Failure      400       {object}  utils.HTTPErrorResponse
 // @Failure      422       {object}  utils.HTTPErrorResponse
 // @Failure      500       {object}  utils.HTTPErrorResponse
-// @Router       /instance/{instance}/message/buttons [post]
-// @Router       /message/sendButtons/{instance} [post]
+// @Router       /v1/instance/{instance}/message/buttons [post]
+// @Router       /v1/message/sendButtons/{instance} [post]
 func (s *Message) SendButtons(ctx echo.Context) error {
 	var request dto.SendButtonsRequest
 	if err := ctx.Bind(&request); err != nil {
@@ -520,14 +568,29 @@ func (s *Message) SendButtons(ctx echo.Context) error {
 		return utils.HTTPFail(ctx, http.StatusBadRequest, err, "invalid number format")
 	}
 
-	// Classify button types (already validated by oneof=reply pix)
-	var hasReply, hasPix bool
+	var hasReply, hasURL, hasPix bool
 	for _, btn := range request.Buttons {
 		switch btn.Type {
 		case "reply":
 			hasReply = true
+		case "url":
+			hasURL = true
 		case "pix":
 			hasPix = true
+		}
+	}
+	if (hasReply && hasURL) || (hasReply && hasPix) || (hasURL && hasPix) {
+		return utils.HTTPFail(ctx, http.StatusBadRequest, fmt.Errorf("button types cannot be mixed in one message"), "invalid button types")
+	}
+	if hasURL {
+		if len(request.Buttons) != 1 {
+			return utils.HTTPFail(ctx, http.StatusBadRequest, fmt.Errorf("exactly one URL button is allowed"), "invalid button count")
+		}
+		for _, btn := range request.Buttons {
+			parsed, parseErr := url.ParseRequestURI(strings.TrimSpace(btn.URL))
+			if parseErr != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+				return utils.HTTPFail(ctx, http.StatusBadRequest, fmt.Errorf("button URL must be an absolute HTTP(S) URL"), "invalid button URL")
+			}
 		}
 	}
 
@@ -547,12 +610,51 @@ func (s *Message) SendButtons(ctx echo.Context) error {
 		return s.sendPixButtons(ctx, c, request, jid)
 	}
 
+	if hasURL {
+		return s.sendURLButtons(ctx, c, request, jid)
+	}
+
 	// Reply buttons flow
 	if hasReply {
 		return s.sendReplyButtons(ctx, c, request, jid)
 	}
 
 	return utils.HTTPFail(ctx, http.StatusBadRequest, fmt.Errorf("no valid buttons"), "no valid buttons provided")
+}
+
+func (s *Message) sendURLButtons(ctx echo.Context, c context.Context, request dto.SendButtonsRequest, jid *types.JID) error {
+	buttons := make([]whatsmiau.SendURLButtonItem, 0, len(request.Buttons))
+	for _, button := range request.Buttons {
+		buttons = append(buttons, whatsmiau.SendURLButtonItem{
+			DisplayText: button.DisplayText,
+			URL:         strings.TrimSpace(button.URL),
+		})
+	}
+
+	res, err := s.whatsmiau.SendURLButtons(c, &whatsmiau.SendURLButtonsRequestData{
+		InstanceID:  request.InstanceID,
+		RemoteJID:   jid,
+		Title:       request.Title,
+		Description: request.Description,
+		Footer:      request.Footer,
+		Buttons:     buttons,
+	})
+	if err != nil {
+		zap.L().Error("Whatsmiau.SendURLButtons failed", zap.Error(err))
+		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to send URL buttons")
+	}
+
+	return ctx.JSON(http.StatusOK, dto.SendButtonsResponse{
+		Key: dto.MessageResponseKey{
+			RemoteJid: request.Number,
+			FromMe:    true,
+			Id:        res.ID,
+		},
+		Status:           "sent",
+		MessageType:      "interactiveMessage",
+		MessageTimestamp: int(res.CreatedAt.Unix()),
+		InstanceId:       request.InstanceID,
+	})
 }
 
 func (s *Message) sendReplyButtons(ctx echo.Context, c context.Context, request dto.SendButtonsRequest, jid *types.JID) error {

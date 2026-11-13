@@ -9,12 +9,16 @@ import (
 type Wook string
 
 const (
-	WookMessagesUpsert   Wook = "messages.upsert"
-	WookMessagesUpdate   Wook = "messages.update"
-	WookContactsUpsert   Wook = "contacts.upsert"
-	WookConnectionUpdate Wook = "connection.update"
-	WookMessagesDelete   Wook = "messages.delete"
-	WookSessionLost      Wook = "session.lost"
+	WookMessagesUpsert          Wook = "messages.upsert"
+	WookMessagesUpdate          Wook = "messages.update"
+	WookContactsUpsert          Wook = "contacts.upsert"
+	WookConnectionUpdate        Wook = "connection.update"
+	WookMessagesDelete          Wook = "messages.delete"
+	WookMessagesSet             Wook = "messages.set"
+	WookGroupParticipantsUpdate Wook = "group-participants.update"
+	WookMessagesEdited          Wook = "messages.edited"
+	WookCall                    Wook = "call"
+	WookSessionLost             Wook = "session.lost"
 )
 
 type WookEvent[data any] struct {
@@ -26,6 +30,8 @@ type WookEvent[data any] struct {
 	ServerUrl   string    `json:"server_url,omitempty"`
 	Apikey      string    `json:"apikey,omitempty"`
 	Event       Wook      `json:"event,omitempty"`
+	IsLatest    *bool     `json:"isLatest,omitempty"`
+	Progress    *int      `json:"progress,omitempty"`
 }
 
 // WookMessageContent is the message body in messages.upsert: text and/or file base64; each null when not present.
@@ -45,8 +51,12 @@ type WookMessageUpsertPayload struct {
 }
 
 // WookMessageKey is the key we emit in message events: only phoneNumber (participant without @suffix).
+// Live webhook events only set PhoneNumber. The embedded WookKey fields (all omitempty) are
+// filled only by API responses built from history (e.g. syncMessages), so the webhook
+// payload stays exactly as before.
 type WookMessageKey struct {
 	PhoneNumber string `json:"phoneNumber,omitempty"`
+	WookKey
 }
 
 type WookMessageData struct {
@@ -55,6 +65,13 @@ type WookMessageData struct {
 	Message     *WookMessageRaw `json:"message,omitempty"`
 	MessageType string          `json:"messageType,omitempty"`
 	InstanceId  string          `json:"instanceId,omitempty"`
+	// Fields below are never set on live webhook events (kept omitempty so the webhook
+	// payload is unchanged); they are used by history-based API responses (syncMessages).
+	Status           string                  `json:"status,omitempty"`
+	ContextInfo      *WookMessageContextInfo `json:"contextInfo,omitempty"`
+	MessageTimestamp int                     `json:"messageTimestamp,omitempty"`
+	Source           string                  `json:"source,omitempty"`
+	PollUpdates      []WookPollUpdate        `json:"pollUpdates,omitempty"`
 }
 
 type WookMessageContextInfo struct {
@@ -101,11 +118,12 @@ type WookMessageExtendedTextMessageContextInfo struct {
 }
 
 type WookKey struct {
-	RemoteJid   string `json:"remoteJid,omitempty"`
-	RemoteLid   string `json:"remoteLid,omitempty"`
-	FromMe      bool   `json:"fromMe,omitempty"`
-	Id          string `json:"id,omitempty"`
-	Participant string `json:"participant,omitempty"`
+	RemoteJid      string `json:"remoteJid,omitempty"`
+	RemoteLid      string `json:"remoteLid,omitempty"`
+	FromMe         bool   `json:"fromMe,omitempty"`
+	Id             string `json:"id,omitempty"`
+	Participant    string `json:"participant,omitempty"`
+	AddressingMode string `json:"addressingMode,omitempty"`
 }
 
 type WookMessageRaw struct {
@@ -121,8 +139,17 @@ type WookMessageRaw struct {
 	ContactsArrayMessage *ContactsArrayMessageRaw `json:"contactsArrayMessage,omitempty"`
 	//MessageContextInfo  WookMessageContextInfo `json:"messageContextInfo,omitempty"`
 
-	ListResponseMessage *WookListMessageRaw `json:"listResponseMessage,omitempty"`
-	MediaURL            string              `json:"mediaUrl,omitempty"` // Sent when connect with some storage
+	ListResponseMessage    *WookListMessageRaw            `json:"listResponseMessage,omitempty"`
+	ButtonsResponseMessage *WookButtonsResponseMessageRaw `json:"buttonsResponseMessage,omitempty"`
+	InteractiveMessage     *WookInteractiveMessageRaw     `json:"interactiveMessage,omitempty"`
+	StickerMessage         *WookStickerMessageRaw         `json:"stickerMessage,omitempty"`
+	LocationMessage        *WookLocationMessageRaw        `json:"locationMessage,omitempty"`
+	LiveLocationMessage    *WookLiveLocationMessageRaw    `json:"liveLocationMessage,omitempty"`
+	PollCreationMessage    *WookPollCreationMessageRaw    `json:"pollCreationMessage,omitempty"`
+	PollUpdateMessage      *WookPollUpdateMessageRaw      `json:"pollUpdateMessage,omitempty"`
+	PtvMessage             *WookPtvMessageRaw             `json:"ptvMessage,omitempty"`
+	EncCommentMessage      *WookEncCommentMessageRaw      `json:"encCommentMessage,omitempty"`
+	MediaURL               string                         `json:"mediaUrl,omitempty"` // Sent when connect with some storage
 }
 
 type ContactsArrayMessageRaw struct {
@@ -133,7 +160,7 @@ type ContactsArrayMessageRaw struct {
 type ContactMessageRaw struct {
 	VCard        string     `json:"vcard,omitempty"`
 	DisplayName  string     `json:"displayName,omitempty"`
-	DecodedVcard vcard.Card `json:"decodedVcard,omitempty"`
+	DecodedVcard vcard.Card `json:"decodedVcard,omitempty" swaggerignore:"true"`
 }
 
 type WookListMessageRaw struct {
@@ -145,6 +172,40 @@ type WookListMessageRaw struct {
 	ButtonText        string                                   `json:"buttonText,omitempty"`
 	Sections          []WookListSection                        `json:"sections,omitempty"`
 	FooterText        string                                   `json:"footerText,omitempty"`
+}
+
+type WookButtonsResponseMessageRaw struct {
+	SelectedButtonID    string `json:"selectedButtonId,omitempty"`
+	SelectedDisplayText string `json:"selectedDisplayText,omitempty"`
+}
+
+type WookInteractiveMessageRaw struct {
+	Header            *WookInteractiveMessageHeaderRaw `json:"header,omitempty"`
+	Body              *WookInteractiveMessageBodyRaw   `json:"body,omitempty"`
+	Footer            *WookInteractiveMessageFooterRaw `json:"footer,omitempty"`
+	NativeFlowMessage *WookNativeFlowMessageRaw        `json:"nativeFlowMessage,omitempty"`
+}
+
+type WookInteractiveMessageHeaderRaw struct {
+	Title string `json:"title,omitempty"`
+}
+
+type WookInteractiveMessageBodyRaw struct {
+	Text string `json:"text,omitempty"`
+}
+
+type WookInteractiveMessageFooterRaw struct {
+	Text string `json:"text,omitempty"`
+}
+
+type WookNativeFlowMessageRaw struct {
+	MessageVersion int32                     `json:"messageVersion,omitempty"`
+	Buttons        []WookNativeFlowButtonRaw `json:"buttons,omitempty"`
+}
+
+type WookNativeFlowButtonRaw struct {
+	Name             string `json:"name,omitempty"`
+	ButtonParamsJSON string `json:"buttonParamsJson,omitempty"`
 }
 
 type WookListMessageRawListSingleSelectReply struct {
@@ -185,6 +246,12 @@ type ReactionMessageRaw struct {
 	Key               *WookKey `json:"key,omitempty"`
 	Text              string   `json:"text,omitempty"`
 	SenderTimestampMs string   `json:"senderTimestampMs,omitempty"`
+}
+
+type WookEncCommentMessageRaw struct {
+	TargetMessageKey *WookKey `json:"targetMessageKey,omitempty"`
+	EncPayload       string   `json:"encPayload,omitempty"`
+	EncIv            string   `json:"encIv,omitempty"`
 }
 
 type WookAudioMessageRaw struct {
@@ -291,6 +358,17 @@ type WookMessageUpdateData struct {
 	InstanceId     string                  `json:"instanceId,omitempty"`
 }
 
+type WookMessageEditData struct {
+	Key              *WookKey        `json:"key,omitempty"`
+	EditedMessage    *WookMessageRaw `json:"editedMessage,omitempty"`
+	MessageType      string          `json:"messageType,omitempty"`
+	InstanceId       string          `json:"instanceId,omitempty"`
+	PushName         string          `json:"pushName,omitempty"`
+	Status           string          `json:"status,omitempty"`
+	MessageTimestamp int             `json:"messageTimestamp,omitempty"`
+	Source           string          `json:"source,omitempty"`
+}
+
 type WookContact struct {
 	RemoteJid     string `json:"remoteJid,omitempty"`
 	RemoteLid     string `json:"remoteLid"`
@@ -309,4 +387,41 @@ type WookConnectionUpdateData struct {
 	ProfilePictureUrl string `json:"profilePictureUrl,omitempty"`
 	State             string `json:"state"`
 	StatusReason      int    `json:"statusReason,omitempty"`
+}
+
+// WookCallData contains call signaling metadata only. It intentionally omits
+// binary call nodes, session keys and media data.
+type WookCallData struct {
+	CallID            string `json:"callId,omitempty"`
+	From              string `json:"from,omitempty"`
+	CallCreator       string `json:"callCreator,omitempty"`
+	CallCreatorAlt    string `json:"callCreatorAlt,omitempty"`
+	GroupJID          string `json:"groupJid,omitempty"`
+	Status            string `json:"status,omitempty"`
+	Media             string `json:"media,omitempty"`
+	IsVideo           *bool  `json:"isVideo,omitempty"`
+	IsGroup           bool   `json:"isGroup,omitempty"`
+	RemotePlatform    string `json:"remotePlatform,omitempty"`
+	RemoteVersion     string `json:"remoteVersion,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	RTCMediaAvailable bool   `json:"rtcMediaAvailable"`
+}
+
+type WookGroupParticipantsUpdateData struct {
+	ID               string                          `json:"id,omitempty"`
+	Author           string                          `json:"author,omitempty"`
+	Participants     []WookGroupParticipantJID       `json:"participants,omitempty"`
+	Action           string                          `json:"action,omitempty"`
+	ParticipantsData []WookGroupParticipantsDataItem `json:"participantsData,omitempty"`
+}
+
+type WookGroupParticipantJID struct {
+	ID          string `json:"id,omitempty"`
+	PhoneNumber string `json:"phoneNumber,omitempty"`
+	Admin       *bool  `json:"admin,omitempty"`
+}
+
+type WookGroupParticipantsDataItem struct {
+	JID         WookGroupParticipantJID `json:"jid,omitempty"`
+	PhoneNumber string                  `json:"phoneNumber,omitempty"`
 }

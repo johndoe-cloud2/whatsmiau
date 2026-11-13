@@ -3,17 +3,16 @@ package dto
 import "github.com/verbeux-ai/whatsmiau/models"
 
 type SetWebhookRequest struct {
-	InstanceID string                `param:"instance" validate:"required"`
+	InstanceID string                `param:"instance" json:"-" validate:"required" swaggerignore:"true"`
 	Webhook    SetWebhookRequestData `json:"webhook" validate:"required"`
 }
 
 type SetWebhookRequestData struct {
-	Enabled  *bool             `json:"enabled,omitempty"`
-	URL      string            `json:"url,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty"`
-	ByEvents *bool             `json:"byEvents,omitempty"`
-	Base64   *bool             `json:"base64,omitempty"`
-	Events   []string          `json:"events,omitempty"`
+	Enabled *bool             `json:"enabled,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Base64  *bool             `json:"base64,omitempty"`
+	Events  []string          `json:"events,omitempty"`
 }
 
 type SetWebhookResponse struct {

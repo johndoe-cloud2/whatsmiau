@@ -29,6 +29,22 @@ func NewWebhooks(repository interfaces.InstanceRepository, whatsmiau *whatsmiau.
 	}
 }
 
+// Set configures outbound webhook delivery for an instance.
+// @Summary Configure an instance webhook
+// @Description Enables or updates the outbound webhook target. Call signaling is emitted only when the configured events include CALL; payloads never contain media, SDP, relay data, or call keys.
+// @Tags Webhooks
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param instance path string true "Instance ID"
+// @Param body body dto.SetWebhookRequest true "Webhook configuration"
+// @Success 200 {object} dto.SetWebhookResponse
+// @Failure 400 {object} utils.HTTPErrorResponse
+// @Failure 401 {object} utils.AuthenticationErrorResponse
+// @Failure 404 {object} utils.HTTPErrorResponse
+// @Failure 422 {object} utils.HTTPErrorResponse
+// @Failure 500 {object} utils.HTTPErrorResponse
+// @Router /v1/webhook/set/{instance} [post]
 func (s *Webhook) Set(ctx echo.Context) error {
 	var request dto.SetWebhookRequest
 	if err := ctx.Bind(&request); err != nil {
@@ -40,15 +56,40 @@ func (s *Webhook) Set(ctx echo.Context) error {
 	}
 
 	c := ctx.Request().Context()
+
+	stored, err := s.repo.List(c, request.InstanceID)
+	if err != nil {
+		zap.L().Error("failed to list instances", zap.Error(err))
+		return utils.HTTPFail(ctx, http.StatusInternalServerError, err, "failed to update webhook")
+	}
+	if len(stored) == 0 {
+		return utils.HTTPFail(ctx, http.StatusNotFound, instances.ErrorNotFound, "instance not found")
+	}
+
+	effectiveURL := stored[0].Webhook.Url
+	if request.Webhook.URL != "" {
+		effectiveURL = request.Webhook.URL
+	}
+	effectiveHeaders := stored[0].Webhook.Headers
+	if request.Webhook.Headers != nil {
+		effectiveHeaders = request.Webhook.Headers
+	}
+
+	if err := validateWebhookHeaders(effectiveHeaders); err != nil {
+		return utils.HTTPFail(ctx, http.StatusBadRequest, err, err.Error())
+	}
+	if err := validateWebhookHeaderTransport(effectiveURL, effectiveHeaders); err != nil {
+		return utils.HTTPFail(ctx, http.StatusBadRequest, err, err.Error())
+	}
+
 	instance, err := s.repo.Update(c, request.InstanceID, &models.Instance{
 		ID: request.InstanceID,
 		Webhook: models.InstanceWebhook{
-			Enabled:  request.Webhook.Enabled,
-			Url:      request.Webhook.URL,
-			ByEvents: request.Webhook.ByEvents,
-			Base64:   request.Webhook.Base64,
-			Headers:  request.Webhook.Headers,
-			Events:   request.Webhook.Events,
+			Enabled: request.Webhook.Enabled,
+			Url:     request.Webhook.URL,
+			Base64:  request.Webhook.Base64,
+			Headers: request.Webhook.Headers,
+			Events:  request.Webhook.Events,
 		},
 	})
 	if err != nil {
@@ -64,6 +105,19 @@ func (s *Webhook) Set(ctx echo.Context) error {
 	})
 }
 
+// Find returns the current outbound webhook configuration for an instance.
+// @Summary Get an instance webhook
+// @Tags Webhooks
+// @Produce json
+// @Security ApiKeyAuth
+// @Param instance path string true "Instance ID"
+// @Success 200 {object} dto.FindWebhookResponse
+// @Failure 400 {object} utils.HTTPErrorResponse
+// @Failure 401 {object} utils.AuthenticationErrorResponse
+// @Failure 404 {object} utils.HTTPErrorResponse
+// @Failure 422 {object} utils.HTTPErrorResponse
+// @Failure 500 {object} utils.HTTPErrorResponse
+// @Router /v1/webhook/find/{instance} [get]
 func (s *Webhook) Find(ctx echo.Context) error {
 	var request dto.FindWebhookRequest
 	if err := ctx.Bind(&request); err != nil {

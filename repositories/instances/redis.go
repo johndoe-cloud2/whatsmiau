@@ -42,20 +42,18 @@ func (s *RedisInstance) Create(ctx context.Context, instance *models.Instance) e
 		return ErrInstanceIDEmpty
 	}
 
-	result, err := s.List(ctx, instance.ID)
-	if err != nil {
-		return err
-	}
-
-	if len(result) > 0 {
-		return ErrorAlreadyExists
-	}
-
 	data, err := json.Marshal(instance)
 	if err != nil {
 		return err
 	}
-	return s.db.Set(ctx, s.key(instance.ID), data, redis.KeepTTL).Err()
+	created, err := s.db.SetNX(ctx, s.key(instance.ID), data, 0).Result()
+	if err != nil {
+		return err
+	}
+	if !created {
+		return ErrorAlreadyExists
+	}
+	return nil
 }
 
 func (s *RedisInstance) Update(ctx context.Context, id string, toUpdate *models.Instance) (*models.Instance, error) {
@@ -82,22 +80,38 @@ func (s *RedisInstance) Update(ctx context.Context, id string, toUpdate *models.
 	if toUpdate.Webhook.Url != "" {
 		oldInstance.Webhook.Url = toUpdate.Webhook.Url
 	}
-	if toUpdate.Webhook.ByEvents != nil {
-		oldInstance.Webhook.ByEvents = toUpdate.Webhook.ByEvents
-	}
 	if toUpdate.Webhook.Base64 != nil {
 		oldInstance.Webhook.Base64 = toUpdate.Webhook.Base64
 	}
 	if toUpdate.Webhook.Headers != nil {
-		if oldInstance.Webhook.Headers == nil {
-			oldInstance.Webhook.Headers = map[string]string{}
-		}
-		for k, v := range toUpdate.Webhook.Headers {
-			oldInstance.Webhook.Headers[k] = v
-		}
+		oldInstance.Webhook.Headers = toUpdate.Webhook.Headers
 	}
 	if toUpdate.Webhook.Events != nil {
 		oldInstance.Webhook.Events = toUpdate.Webhook.Events
+	}
+
+	if toUpdate.GroupsIgnore != nil {
+		oldInstance.GroupsIgnore = toUpdate.GroupsIgnore
+	}
+
+	if toUpdate.SaveMedia != nil {
+		oldInstance.SaveMedia = toUpdate.SaveMedia
+	}
+
+	if toUpdate.ReadMessages != nil {
+		oldInstance.ReadMessages = toUpdate.ReadMessages
+	}
+
+	if toUpdate.AlwaysOnline != nil {
+		oldInstance.AlwaysOnline = toUpdate.AlwaysOnline
+	}
+
+	if toUpdate.MsgCall != nil {
+		oldInstance.MsgCall = toUpdate.MsgCall
+	}
+
+	if toUpdate.RejectCall != nil {
+		oldInstance.RejectCall = toUpdate.RejectCall
 	}
 
 	if toUpdate.ProxyHost != "" {
@@ -124,7 +138,17 @@ func (s *RedisInstance) Update(ctx context.Context, id string, toUpdate *models.
 		return nil, err
 	}
 
-	return &oldInstance, s.db.Set(ctx, s.key(id), data, redis.KeepTTL).Err()
+	err = s.db.SetArgs(ctx, s.key(id), data, redis.SetArgs{
+		Mode:    "XX",
+		KeepTTL: true,
+	}).Err()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrorNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &oldInstance, nil
 }
 
 func (s *RedisInstance) List(ctx context.Context, id string) ([]models.Instance, error) {
@@ -198,12 +222,11 @@ func (s *RedisInstance) Delete(ctx context.Context, id string) error {
 		return ErrInstanceIDEmpty
 	}
 
-	result, err := s.List(ctx, id)
+	deleted, err := s.db.Del(ctx, s.key(id)).Result()
 	if err != nil {
 		return err
 	}
-
-	if len(result) <= 0 {
+	if deleted == 0 {
 		return ErrorNotFound
 	}
 
